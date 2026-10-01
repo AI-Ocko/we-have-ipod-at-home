@@ -342,6 +342,18 @@ Sound quality on 32-bit frames can only be judged by ear; it is in the user's ha
 
 ---
 
+### Task 5b: The lost last block (added during execution)
+
+**Files:**
+- Modify: `main/player.c`
+- Create: `docs/superpowers/plans/stage3-eos-investigation.md`
+
+Found in Task 5: `t10_loud_quiet_44k_16_st.flac` ends with `ENDED frames=880640 expected=882000` and `E AUD_Dec_Parse: Not found frame in max frame size 13421`. The final partial block (1360 frames) is never returned: the parser takes the file's last byte and gives nothing back, and extra empty end-of-stream calls do not flush it. Every other test file, and the music track, delivers its last partial block. A debugging task under the same rules as Task 3: root cause first, demonstrated both ways, then the smallest fix. If the cause is inside the prebuilt library and cannot be worked around from our side without guessing, STOP and report with the evidence.
+
+Acceptance: `t10` ends with `frames=882000 expected=882000` and no parser error; `t01`, `t02`, `t03`, `t06` and the music track are still exact.
+
+---
+
 ### Task 6: Player tasks, commands, events, debug console
 
 **Files:**
@@ -402,7 +414,11 @@ esp_err_t player_set_volume(int level);      // 0..20, clamped
 
 Required behaviour:
 - **States:** idle, playing, paused. `play` from any state fades out what is playing (if anything), discards buffered audio, and starts the new track. `pause` while playing fades out and holds; anything else ignores it. `resume` while paused fades in from where it stopped, with no audio lost or repeated; anything else ignores it. `stop` fades out, discards buffered audio and goes idle, from any state. `set_volume` takes effect within 50 ms in any state and moves the gain smoothly (use the ramp) so a volume change never clicks.
-- **Buffer:** a FreeRTOS stream buffer with 786432 bytes of storage allocated from PSRAM. The decoder task fills it with 32-bit stereo frames; the output task drains it. The decoder must keep servicing commands while the buffer is full (bounded waits, not an unbounded block).
+- **Buffer:** a FreeRTOS stream buffer with 786432 bytes of storage allocated from PSRAM. The decoder task fills it with the decoder's own PCM, unconverted (16-bit, or 24-bit packed; mono or stereo); the output task drains it. The decoder must keep servicing commands while the buffer is full (bounded waits, not an unbounded block).
+- **Where conversion happens (amended after Task 5's measurements):** PSRAM is slow. Task 5 measured conversion plus gain at 21% of real time for 96 kHz 24-bit when the 32-bit buffer was in PSRAM, against 1.5% in internal RAM, and the whole blocking loop at 88% busy. So: (a) the decoder's output buffer lives in internal RAM, not PSRAM; (b) the ring holds native PCM, which is half the bytes of 32-bit stereo for CD audio and so also doubles the seconds it can hold; (c) the output task reads a small block from the ring into internal RAM, converts it to 32-bit stereo with `pcm_to_s32_stereo`, applies gain, and writes it to I2S, all in internal RAM. The stream format (rate, `pcm_format_t`, channels) is fixed for a track and is handed to the output task when the track starts. Only whole frames may be read from the ring.
+- **Headroom must be measured:** for `t02` (96 kHz 24-bit) report how busy the decoder task and the output task each are as a fraction of real time, and the ring's lowest fill over the track. If 96 kHz 24-bit cannot be sustained with margin, say so with the numbers; do not hide it. As an experiment only (report the result, do not commit it unless it is clearly safe and you say why): whether `CONFIG_SPIRAM_SPEED_80M` with `CONFIG_ESPTOOLPY_FLASHFREQ_80M` builds, boots and changes those numbers.
+- **Nothing cut off at the end of a track:** `audio_out_stop()` writes very little silence before disabling I2S, while up to 8000 frames (the DMA ring, 181 ms at 44.1 kHz) may still be waiting to be sent. At a natural end of track the output task must make sure every real frame has left the DMA before the channel is disabled or reused: for example by writing a DMA ring's worth of silence first. Changing `audio_out_stop()` or adding an `audio_out_drain()` is allowed for this. A fade-out on pause, stop or seek is different: there the remaining buffered audio is discarded on purpose.
+- **The last block of a track must not be lost:** `t10` currently ends 1360 frames short because the decoder's final, small frame is never returned (found in Task 5; investigated in Task 5b, `docs/superpowers/plans/stage3-eos-investigation.md`). Carry that task's fix into the decoder task. `t10` must end with `frames=882000`.
 - **End of track:** `ENDED` is posted when the last buffered frame has been handed to I2S, not when the decoder reaches the end of the file. `ENDED frames= expected=` is logged then.
 - **Position:** counted from frames handed to I2S. `POSITION` every 500 ms of audio. Paused time does not count.
 - **Errors:** missing file, unsupported format or rate, decode failure, read failure and allocation failure each post one `ERROR` and return the player to idle, ready for the next `play`. A decode failure part-way through a track plays out what was already buffered, then posts `ERROR`.
@@ -419,7 +435,7 @@ Required behaviour:
 
 Board checks, all driven by `tools/serial_script.py` and judged from the log:
 1. `play /sdcard/test/t01_44k_16_st.flac`: `STARTED ... rate=44100 bits=16 ch=2 duration_ms=10000`, at least 18 `POSITION` lines with strictly increasing `ms`, `ENDED frames=441000 expected=441000`.
-2. Back to back without resetting: `t02` (96000, 24, 2, `frames=960000`), `t03` (48000, 16, 1, `frames=480000`), then `t01` again.
+2. Back to back without resetting: `t02` (96000, 24, 2, `frames=960000`), `t03` (48000, 16, 1, `frames=480000`), `t10` (`frames=882000`), then `t01` again.
 3. Pause: play `t06`, at about 5 s `pause`, wait 4 s (no `POSITION` lines in that time), `resume`, play to the end: `ENDED frames=1323000 expected=1323000`.
 4. Every command in every state (Review Focus 3): script each of `pause`, `resume`, `stop`, `vol 0`, `vol 20`, `vol 99`, `vol -3`, `seek 1000`, and a second `play`, sent while idle, while playing and while paused. No crash, no hang, and a final `play t01` still ends with the exact frame count.
 5. Bad files (Review Focus 4): `play /sdcard/test/nope.flac` gives `ERROR reason=not_found`; `t07_empty.flac` and `t08_not_audio.flac` give one `ERROR` each; `t09_truncated.flac` gives `ENDED` or one `ERROR` after playing part of the file; `play /sdcard/test/t04_44k_cbr192_st.mp3` gives `ERROR reason=unsupported`. After each, `play t01` works.

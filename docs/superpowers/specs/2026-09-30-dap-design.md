@@ -225,9 +225,8 @@ is doubt, measure on the board.
 
 ### Output format
 
-Everything is converted to **32-bit stereo frames at the file's own sample
-rate** before it enters the ring buffer. Each sample is left-justified in its
-32-bit word:
+The DAC is always fed **32-bit stereo frames at the file's own sample rate**.
+Each sample is left-justified in its 32-bit word:
 
 - 24-bit sources are shifted left 8 bits, so all 24 bits reach the DAC.
 - 16-bit sources are shifted left 16 bits.
@@ -236,26 +235,43 @@ rate** before it enters the ring buffer. Each sample is left-justified in its
   "Can't play".
 
 The PCM5102A accepts 32-bit I2S frames and uses the top 24 bits. A single
-output format keeps volume scaling, fades and buffer sizing simple, delivers
-true 24-bit output, and means software volume no longer discards detail from
-16-bit sources (the attenuated signal uses the spare low bits).
+output format keeps volume scaling and fades simple, delivers true 24-bit
+output, and means software volume no longer discards detail from 16-bit
+sources (the attenuated signal uses the spare low bits).
 
 This doubles the I2S bit clock compared with the 16-bit configuration that was
-verified by ear (2.8 MHz instead of 1.4 MHz at 44.1 kHz). Stage 3's hardware
-check compares against that baseline. Fallback if the faster clock is noisy on
-breadboard wiring: 16-bit frames for 16-bit sources, 32-bit frames only for
-24-bit sources.
+first verified by ear (2.8 MHz instead of 1.4 MHz at 44.1 kHz). Fallback if the
+faster clock is noisy on breadboard wiring: 16-bit frames for 16-bit sources,
+32-bit frames only for 24-bit sources.
+
+### Where conversion happens
+
+Measured in stage 3: PSRAM is slow enough to matter. With the converted
+32-bit buffer in PSRAM, conversion plus volume cost 21% of real time for
+96 kHz 24-bit audio; in internal RAM the same work costs 1.5%. So:
+
+- the decoder's output buffer is in internal RAM;
+- the ring buffer holds the decoder's own PCM, unconverted (16-bit, or 24-bit
+  packed in 3 bytes; mono or stereo);
+- the output task reads a small block from the ring into internal RAM,
+  converts it to 32-bit stereo, applies volume and fades, and writes it to
+  I2S.
 
 ### Ring buffer
 
-768 KB in PSRAM between decoder and output: about 2.2 seconds at 44.1 kHz,
-1.0 second at 96 kHz. It absorbs SD card stalls, including playlist and
-resume-state writes during playback.
+768 KB in PSRAM between decoder and output, holding native PCM: about 4.4
+seconds at 44.1 kHz 16-bit stereo, 1.3 seconds at 96 kHz 24-bit stereo. It
+absorbs SD card stalls, including playlist and resume-state writes during
+playback.
 
 The compressed-input buffer (32 KB) must be internal DMA-capable RAM
 (`MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA`); the SDMMC driver cannot read into
 PSRAM. Input bytes are never moved while the decoder still holds unconsumed
 data, because the decoder keeps pointers into that buffer.
+
+Measured decode speed on this board (`-O2`, 240 MHz, including SD reads):
+about 4 times real time for 44.1 kHz 16-bit music, 1.6 times for 96 kHz
+24-bit. 96 kHz 24-bit is the case with little headroom.
 
 ### I2S
 
@@ -279,6 +295,9 @@ value using 64-bit intermediate arithmetic. Default on first boot: 10.
 - After a fade-out with nothing more to play, the output task writes silence,
   waits 50 ms, and disables the I2S channel. Leaving it enabled and idle makes
   the DMA replay stale data as a buzz.
+- At a natural end of track, every real frame must have left the I2S DMA
+  buffers (up to 8000 frames, 181 ms at 44.1 kHz) before the channel is
+  disabled or retuned, so the last moments of a track are not cut off.
 - Between consecutive tracks of the same sample rate the channel stays enabled;
   there is a short silence but no click. Gapless playback is not attempted.
 
