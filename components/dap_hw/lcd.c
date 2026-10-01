@@ -28,27 +28,73 @@
 // with EN high, then again with EN low.
 #define BYTES_PER_LCD_BYTE 4
 
+// One expander byte that puts RS at its new level before EN rises.
+#define BYTES_PER_RS_SETUP 1
+
+#define GLYPH_COUNT 8 // user-defined characters the LCD can hold
+#define GLYPH_ROWS 8  // pixel rows in each
+
 static const char *TAG = "lcd";
 
 static const uint8_t ADDRESSES[] = {0x27, 0x3F};
 
 static i2c_master_bus_handle_t s_bus;
 static i2c_master_dev_handle_t s_dev;
+static uint8_t s_address; // where the LCD answered, for probing it again
 static uint8_t s_backlight = BIT_BACKLIGHT;
 
 // What the LCD is currently showing, so lcd_show can send only differences.
+// Not valid means the LCD's state is unknown: it has not been initialised, or
+// a transfer failed and may have left it half a byte out of step.
 static screen_t s_shown;
 static bool s_shown_valid;
+
+// The user-defined characters, kept so they can be sent again when the LCD
+// is re-initialised. Bit `i` of the mask is set once glyph `i` is defined.
+static uint8_t s_glyphs[GLYPH_COUNT][GLYPH_ROWS];
+static uint8_t s_glyph_mask;
 
 // Wait at least `ms`. vTaskDelay rounds down to whole ticks and the first
 // tick may be almost over already, so add one.
 static void wait_ms(uint32_t ms) { vTaskDelay(pdMS_TO_TICKS(ms) + 1); }
 
+// Every transfer to the LCD goes through here. A failure means the LCD may
+// have seen only part of a byte, so its state is no longer known: lcd_show
+// re-initialises it before the next update. Only the first failure is logged,
+// so an unplugged LCD gives one line rather than one per update.
+static esp_err_t transmit(const uint8_t *buf, size_t len) {
+  esp_err_t err = i2c_master_transmit(s_dev, buf, len, I2C_TIMEOUT_MS);
+  if (err != ESP_OK) {
+    if (s_shown_valid) {
+      ESP_LOGW(TAG,
+               "LCD transfer failed (%s); will re-initialise on the next update",
+               esp_err_to_name(err));
+    }
+    s_shown_valid = false;
+  }
+  return err;
+}
+
+// Append one expander byte that sets RS with EN low and the data lines at 0.
+// `rs` is 0 for commands or BIT_RS for character data. Returns the new length
+// of `buf`.
+//
+// The LCD needs RS to be steady for at least 40 ns before EN rises. All the
+// expander's pins change at the same instant, so raising EN in the same byte
+// that changes RS would give no margin at all. This byte goes in front of
+// every group of LCD bytes whose RS may differ from the group before.
+static size_t append_rs_setup(uint8_t *buf, size_t len, uint8_t rs) {
+  buf[len++] = (uint8_t)(rs | s_backlight);
+  return len;
+}
+
 // Append the expander bytes that send one byte to the LCD. `rs` is 0 for a
-// command or BIT_RS for character data. Returns the new length of `buf`.
+// command or BIT_RS for character data, and must already be on the RS line:
+// see append_rs_setup. Returns the new length of `buf`.
 //
 // A whole run of these goes out in one I2C transfer. Each expander byte takes
-// 90 us on the wire, which is longer than the 37 us the LCD needs between
+// 90 us on the wire, so EN is high for 90 us with the data steady, and one
+// LCD byte takes 360 us. That is longer than the 37 us the LCD needs between
 // operations, so no delays are needed inside a transfer.
 static size_t append_byte(uint8_t *buf, size_t len, uint8_t value, uint8_t rs) {
   uint8_t high = (uint8_t)((value & 0xF0) | rs | s_backlight);
@@ -61,17 +107,19 @@ static size_t append_byte(uint8_t *buf, size_t len, uint8_t value, uint8_t rs) {
 }
 
 static esp_err_t send_command(uint8_t command) {
-  uint8_t buf[BYTES_PER_LCD_BYTE];
-  size_t len = append_byte(buf, 0, command, 0);
-  return i2c_master_transmit(s_dev, buf, len, I2C_TIMEOUT_MS);
+  uint8_t buf[BYTES_PER_RS_SETUP + BYTES_PER_LCD_BYTE];
+  size_t len = append_rs_setup(buf, 0, 0);
+  len = append_byte(buf, len, command, 0);
+  return transmit(buf, len);
 }
 
 // Send only the upper half of a byte. Needed at power-up, while the LCD is
 // still in 8-bit mode and reads all eight (half-connected) data lines at once.
+// These are all commands, so RS stays low and needs no set-up byte.
 static esp_err_t send_half(uint8_t half) {
   uint8_t value = (uint8_t)((half << 4) | s_backlight);
   uint8_t buf[2] = {value | BIT_EN, value};
-  return i2c_master_transmit(s_dev, buf, sizeof(buf), I2C_TIMEOUT_MS);
+  return transmit(buf, sizeof(buf));
 }
 
 // The HD44780's documented power-up sequence for a 4-bit bus.
@@ -102,6 +150,44 @@ static esp_err_t reset_controller(void) {
       (err = send_command(CMD_DISPLAY_ON)) != ESP_OK) {
     return err;
   }
+  return ESP_OK;
+}
+
+// Send one cached user-defined character to the LCD.
+static esp_err_t send_glyph(int index) {
+  uint8_t buf[2 * BYTES_PER_RS_SETUP + BYTES_PER_LCD_BYTE * (1 + GLYPH_ROWS)];
+  size_t len = append_rs_setup(buf, 0, 0);
+  len = append_byte(buf, len, (uint8_t)(CMD_SET_CGRAM | (index << 3)), 0);
+  len = append_rs_setup(buf, len, BIT_RS);
+  for (int i = 0; i < GLYPH_ROWS; i++) {
+    len = append_byte(buf, len, s_glyphs[index][i], BIT_RS);
+  }
+  // This leaves the LCD addressing its character-generator memory. That is
+  // harmless: every lcd_show run starts by setting the display address.
+  return transmit(buf, len);
+}
+
+// Bring the LCD back after a failed transfer: start it again from scratch and
+// restore the user-defined characters. It ends up blank, and s_shown says so.
+static esp_err_t recover(void) {
+  // Ask first whether the LCD is there at all. If it has been unplugged this
+  // fails at once, so each update costs one short probe and none of the
+  // delays in the reset sequence.
+  esp_err_t err = i2c_master_probe(s_bus, s_address, I2C_TIMEOUT_MS);
+  if (err != ESP_OK) {
+    return err;
+  }
+  if ((err = reset_controller()) != ESP_OK) {
+    return err;
+  }
+  for (int i = 0; i < GLYPH_COUNT; i++) {
+    if ((s_glyph_mask & (1u << i)) && (err = send_glyph(i)) != ESP_OK) {
+      return err;
+    }
+  }
+  screen_clear(&s_shown); // matches the LCD after CMD_CLEAR
+  s_shown_valid = true;
+  ESP_LOGI(TAG, "LCD re-initialised");
   return ESP_OK;
 }
 
@@ -161,6 +247,7 @@ esp_err_t lcd_init(int sda_pin, int scl_pin) {
     return err;
   }
 
+  s_address = address;
   screen_clear(&s_shown); // matches the LCD after CMD_CLEAR
   s_shown_valid = true;
   ESP_LOGI(TAG, "LCD found at 0x%02X", address);
@@ -174,46 +261,46 @@ esp_err_t lcd_show(const screen_t *wanted) {
     return ESP_ERR_INVALID_STATE;
   }
 
+  if (!s_shown_valid) {
+    // A previous transfer failed, so the LCD may be half a byte out of step
+    // and nothing sent to it would be understood. Start it again; it comes
+    // back blank, and the diff below then redraws whatever is wanted.
+    esp_err_t err = recover();
+    if (err != ESP_OK) {
+      return err;
+    }
+  }
+
   screen_run_t runs[SCREEN_MAX_RUNS];
-  int count;
-  if (s_shown_valid) {
-    count = screen_diff(&s_shown, wanted, runs);
-    if (count == 0) {
-      return ESP_OK; // nothing changed: no I2C traffic at all
-    }
-  } else {
-    // A previous transfer failed part-way, so the LCD's contents are unknown.
-    // Send both rows in full.
-    for (int row = 0; row < SCREEN_ROWS; row++) {
-      runs[row] = (screen_run_t){
-          .row = (uint8_t)row, .col = 0, .len = SCREEN_COLS};
-    }
-    count = SCREEN_ROWS;
+  int count = screen_diff(&s_shown, wanted, runs);
+  if (count == 0) {
+    return ESP_OK; // nothing changed: no I2C traffic at all
   }
 
   // The whole update goes out as one I2C transfer: for each run, a cursor
-  // move followed by its characters. Sized for the worst case, every cell
-  // plus one cursor move per run.
-  uint8_t buf[BYTES_PER_LCD_BYTE *
-              (SCREEN_MAX_RUNS + SCREEN_ROWS * SCREEN_COLS)];
+  // move followed by its characters, with an RS set-up byte in front of each
+  // of the two. Sized for the worst case: every cell, plus one cursor move
+  // and two set-up bytes per run.
+  uint8_t buf[SCREEN_MAX_RUNS * (2 * BYTES_PER_RS_SETUP + BYTES_PER_LCD_BYTE) +
+              BYTES_PER_LCD_BYTE * SCREEN_ROWS * SCREEN_COLS];
   size_t len = 0;
   for (int i = 0; i < count; i++) {
     uint8_t address =
         (uint8_t)((runs[i].row ? ROW_1_ADDRESS : 0) + runs[i].col);
+    len = append_rs_setup(buf, len, 0);
     len = append_byte(buf, len, CMD_SET_DDRAM | address, 0);
+    len = append_rs_setup(buf, len, BIT_RS);
     const char *cells = &wanted->cells[runs[i].row][runs[i].col];
     for (int c = 0; c < runs[i].len; c++) {
       len = append_byte(buf, len, (uint8_t)cells[c], BIT_RS);
     }
   }
 
-  esp_err_t err = i2c_master_transmit(s_dev, buf, len, I2C_TIMEOUT_MS);
+  esp_err_t err = transmit(buf, len);
   if (err != ESP_OK) {
-    s_shown_valid = false;
     return err;
   }
   s_shown = *wanted;
-  s_shown_valid = true;
   return ESP_OK;
 }
 
@@ -221,17 +308,16 @@ esp_err_t lcd_define_char(int index, const uint8_t rows[8]) {
   if (!s_dev) {
     return ESP_ERR_INVALID_STATE;
   }
-  if (index < 0 || index > 7) {
+  if (index < 0 || index >= GLYPH_COUNT) {
     return ESP_ERR_INVALID_ARG;
   }
-  uint8_t buf[BYTES_PER_LCD_BYTE * (1 + 8)];
-  size_t len = append_byte(buf, 0, (uint8_t)(CMD_SET_CGRAM | (index << 3)), 0);
-  for (int i = 0; i < 8; i++) {
-    len = append_byte(buf, len, rows[i] & 0x1F, BIT_RS);
+  // Remember it before sending, so that a glyph defined while the link is
+  // down still reaches the LCD when it is re-initialised.
+  for (int i = 0; i < GLYPH_ROWS; i++) {
+    s_glyphs[index][i] = rows[i] & 0x1F;
   }
-  // This leaves the LCD addressing its character-generator memory. That is
-  // harmless: every lcd_show run starts by setting the display address.
-  return i2c_master_transmit(s_dev, buf, len, I2C_TIMEOUT_MS);
+  s_glyph_mask |= (uint8_t)(1u << index);
+  return send_glyph(index);
 }
 
 esp_err_t lcd_set_backlight(bool on) {
@@ -241,5 +327,5 @@ esp_err_t lcd_set_backlight(bool on) {
   s_backlight = on ? BIT_BACKLIGHT : 0;
   // A byte with EN low changes the backlight and nothing else.
   uint8_t value = s_backlight;
-  return i2c_master_transmit(s_dev, &value, 1, I2C_TIMEOUT_MS);
+  return transmit(&value, 1);
 }
