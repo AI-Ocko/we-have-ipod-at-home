@@ -604,7 +604,12 @@ Each stage ends with firmware that works and does more than the last.
    *Check: text is readable; every one of the 16 keys shows correctly; long
    press and repeat work. Optional: measure backlight current with a
    multimeter.*
-3. **Player.** Decoder and output tasks, ring buffer, command and event queues,
+3. **Player.** First, find and fix a defect inherited from the example and
+   measured in stage 1: on the test track the decoder logs
+   `AUD_Dec_Parse: Not found frame in max frame size` about 4 seconds in, and
+   2,718 blocks are decoded where the track's length implies about 2,750, so
+   roughly 3 seconds of audio are skipped. Stage 1 preserved this on purpose.
+   Then: decoder and output tasks, ring buffer, command and event queues,
    volume, pause/resume with fades, MP3 support, conversion of 16-bit, 24-bit
    and mono sources to 32-bit stereo frames.
    Temporary key bindings: D play/pause, A/B volume.
