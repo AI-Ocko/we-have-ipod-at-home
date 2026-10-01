@@ -31,6 +31,28 @@
 // phases: decoding (the file is open and blocks are still being produced) and
 // draining (the file is finished and closed; the ring is playing out).
 //
+// Formats
+// -------
+// FLAC and MP3, chosen by the file's extension. From the decoder's first
+// call onward both take one path, with the decoder type as its only
+// parameter; they differ in what is known when the file is opened:
+//
+//   FLAC  The header states the format, the exact frame count (ENDED's
+//         `expected`) and so the length. The decoder is fed the whole file,
+//         header included.
+//   MP3   Tags are stepped over, not fed to the decoder: reading starts
+//         after an ID3v2 tag and stops before an ID3v1 tag. The length comes
+//         from the Xing/Info header in the first frame if the encoder wrote
+//         one (nearly all do). If not, it is estimated when the first block
+//         has been decoded, as the audio bytes at that frame's bit rate:
+//         right for a constant bit rate, wrong for a variable one. Either
+//         way it is known before STARTED. There is no frame count to hold
+//         the decoder to, so `expected` is 0.
+//
+// The format the stream really has (rate, bits, channels) is taken from the
+// decoder after its first block, for both. A file that is not what its
+// extension says does not decode and ends in ERROR.
+//
 // Who owns what
 // -------------
 // Decoder task only: `s_dec` (the track, file, decoder handle, both decoder
@@ -101,7 +123,7 @@
 //          the track's last frames out of the DMA ring) before stopping it.
 // decode or read error part-way:
 //          as end of track, but the decoder task posts ERROR instead of ENDED.
-// error before anything was buffered (missing file, not a FLAC, ...):
+// error before anything was buffered (missing file, not audio, ...):
 //          the decoder task posts ERROR at once; the output task is not
 //          involved.
 // underrun:
@@ -164,6 +186,8 @@
 #include "freertos/semphr.h"
 #include "freertos/stream_buffer.h"
 #include "freertos/task.h"
+#include "id3.h"
+#include "mp3_xing.h"
 #include "pcm.h"
 #include "player_status.h"
 #include <errno.h>
@@ -177,7 +201,9 @@
 
 #define RING_BYTES 786432 // native PCM: 4.4 s at 44.1 kHz 16-bit stereo
 #define IN_CHUNK 32768    // compressed input; must exceed the largest frame
-#define OUT_INIT 32768    // decoder output: 4096 frames of 24-bit stereo fit
+// Decoder output: 4096 frames of 24-bit stereo (FLAC's usual block) fit. An
+// MP3 block is 1152 frames of 16-bit stereo, 4608 bytes.
+#define OUT_INIT 32768
 
 // The output task moves one DMA buffer's worth at a time.
 #define BLOCK_FRAMES AUDIO_OUT_BLOCK_FRAMES
@@ -729,6 +755,11 @@ typedef struct {
 
   FILE *file;
   uint32_t file_left; // bytes not yet read
+  // Where the audio is in the file. FLAC: after the metadata blocks, to the
+  // end. MP3: after an ID3v2 tag, up to an ID3v1 tag.
+  uint32_t audio_start;
+  uint32_t audio_end;
+  esp_audio_simple_dec_type_t type; // FLAC or MP3, by the file's extension
   esp_audio_simple_dec_handle_t dec;
   esp_audio_simple_dec_raw_t raw; // the input not yet consumed
 
@@ -744,8 +775,8 @@ typedef struct {
   uint32_t pending;  // bytes at the start of `out` waiting for room in the ring
   uint32_t sent;     // bytes put in the ring so far
   uint32_t expected; // frames, from the file's header; 0 if it does not say
-  uint32_t duration_ms;
-  int end_error; // what to report when the ring has played out
+  uint32_t duration_ms; // 0 if unknown
+  int end_error;        // what to report when the ring has played out
   uint32_t busy_us;
 
   // Made once and kept from track to track.
@@ -890,13 +921,110 @@ static bool rate_supported(uint32_t rate) {
   return rate >= AUDIO_OUT_RATE_MIN && rate <= AUDIO_OUT_RATE_MAX;
 }
 
+// What the open FLAC file (`size` bytes) says about itself, and where to
+// read it from. Returns NO_ERROR or why it cannot be played.
+static int dec_prepare_flac(uint32_t size) {
+  dec_t *d = &s_dec;
+
+  // The header gives the length (for ENDED and the duration) and lets a file
+  // that cannot be played be refused before any audio is touched.
+  flac_header_t header;
+  if (flac_header_read(d->file, &header) != FLAC_HEADER_OK) {
+    return PLAYER_ERROR_DECODE;
+  }
+  if (!rate_supported(header.sample_rate) ||
+      (header.bits_per_sample != 16 && header.bits_per_sample != 24) ||
+      (header.channels != 1 && header.channels != 2)) {
+    return PLAYER_ERROR_UNSUPPORTED;
+  }
+  // The frame count is kept in 32 bits (over 12 hours at 96 kHz). A longer
+  // file plays, with its length treated as unknown.
+  d->expected =
+      header.total_frames <= UINT32_MAX ? (uint32_t)header.total_frames : 0;
+  d->duration_ms = d->expected ? flac_header_duration_ms(&header) : 0;
+  d->audio_start = (uint32_t)header.audio_start;
+  d->audio_end = size;
+
+  // The decoder parses the file from its first byte, header included.
+  if (fseek(d->file, 0, SEEK_SET) != 0) {
+    return PLAYER_ERROR_IO;
+  }
+  d->file_left = size;
+  return NO_ERROR;
+}
+
+// The same for an MP3 file. An MP3 states neither its format nor a frame
+// count the player could hold it to; the format is learnt from the first
+// decoded block (see dec_learn_format). Its length is read here if the
+// encoder left a Xing/Info header, and otherwise estimated there.
+static int dec_prepare_mp3(uint32_t size) {
+  dec_t *d = &s_dec;
+  uint8_t b[MP3_XING_PROBE_BYTES];
+  _Static_assert(sizeof(b) >= ID3V2_HEADER_BYTES, "also holds a tag header");
+
+  // A tag in front of the audio is stepped over rather than fed to the
+  // decoder: it can hold a cover picture of several hundred kilobytes, which
+  // would all be read from the card only to be thrown away. A file too short
+  // to hold a tag header is left for the decoder to refuse.
+  uint32_t start = 0;
+  if (fread(b, 1, ID3V2_HEADER_BYTES, d->file) == ID3V2_HEADER_BYTES) {
+    start = id3v2_tag_bytes(b);
+  } else if (ferror(d->file)) {
+    return PLAYER_ERROR_IO;
+  }
+  // A tag at the end is 128 bytes that are not audio. Leaving them out keeps
+  // them away from the decoder and out of the length estimate.
+  uint32_t end = size;
+  if (start <= size && size - start >= ID3V1_TAG_BYTES) {
+    if (fseek(d->file, (long)(size - ID3V1_TAG_BYTES), SEEK_SET) != 0 ||
+        fread(b, 1, ID3V1_MARKER_BYTES, d->file) != ID3V1_MARKER_BYTES) {
+      return PLAYER_ERROR_IO;
+    }
+    if (id3v1_tag_begins(b)) {
+      end -= ID3V1_TAG_BYTES;
+    }
+  }
+  if (start >= end) {
+    return PLAYER_ERROR_DECODE; // tags and nothing else, or cut short
+  }
+  // The first frame, where the encoder says how long the stream is. Then
+  // back to it: the decoder reads it too (and trims the encoder's padding by
+  // what it finds there).
+  if (fseek(d->file, (long)start, SEEK_SET) != 0) {
+    return PLAYER_ERROR_IO;
+  }
+  size_t got = fread(b, 1, sizeof(b), d->file);
+  if (ferror(d->file) || fseek(d->file, (long)start, SEEK_SET) != 0) {
+    return PLAYER_ERROR_IO;
+  }
+  d->duration_ms = mp3_xing_duration_ms(b, got); // 0: estimated later
+  d->expected = 0; // an MP3 does not promise a frame count
+  d->audio_start = start;
+  d->audio_end = end;
+  d->file_left = end - start;
+  return NO_ERROR;
+}
+
+// The decoder for a file, chosen by its extension. The contents are not
+// looked at here: a file that is not what its name says fails to decode.
+static esp_audio_simple_dec_type_t type_of(const char *path) {
+  const char *dot = strrchr(path, '.');
+  if (dot && strcasecmp(dot, ".flac") == 0) {
+    return ESP_AUDIO_SIMPLE_DEC_TYPE_FLAC;
+  }
+  if (dot && strcasecmp(dot, ".mp3") == 0) {
+    return ESP_AUDIO_SIMPLE_DEC_TYPE_MP3;
+  }
+  return ESP_AUDIO_SIMPLE_DEC_TYPE_NONE;
+}
+
 // Open `path` and get ready to decode it. Returns NO_ERROR or the reason it
 // cannot be played; on failure nothing is left open.
 static int dec_open(const char *path) {
   dec_t *d = &s_dec;
 
-  const char *dot = strrchr(path, '.');
-  if (!dot || strcasecmp(dot, ".flac") != 0) {
+  d->type = type_of(path);
+  if (d->type == ESP_AUDIO_SIMPLE_DEC_TYPE_NONE) {
     return PLAYER_ERROR_UNSUPPORTED;
   }
 
@@ -905,41 +1033,27 @@ static int dec_open(const char *path) {
     return errno == ENOENT ? PLAYER_ERROR_NOT_FOUND : PLAYER_ERROR_IO;
   }
 
-  // The size says which read carries the file's last bytes: the decoder must
-  // be told (`eos`), or it keeps the final block back.
+  // The size says which read carries the last bytes of the audio: the decoder
+  // must be told (`eos`), or it keeps the final block back. Sizes and offsets
+  // are kept in 32 bits; FAT cannot hold a file that needs more, and one over
+  // 2 GB could not be seeked in (`long` is 32 bits here).
   struct stat st;
-  if (fstat(fileno(d->file), &st) != 0 || st.st_size < 0) {
+  if (fstat(fileno(d->file), &st) != 0 || st.st_size < 0 ||
+      st.st_size > INT32_MAX) {
     dec_close_source();
     return PLAYER_ERROR_IO;
   }
-  d->file_left = (uint32_t)st.st_size;
 
-  // The header gives the length (for ENDED and the duration) and lets a file
-  // that cannot be played be refused before any audio is touched. The decoder
-  // parses the file from its first byte, so go back there afterwards.
-  flac_header_t header;
-  if (flac_header_read(d->file, &header) != FLAC_HEADER_OK) {
+  int error = d->type == ESP_AUDIO_SIMPLE_DEC_TYPE_FLAC
+                  ? dec_prepare_flac((uint32_t)st.st_size)
+                  : dec_prepare_mp3((uint32_t)st.st_size);
+  if (error != NO_ERROR) {
     dec_close_source();
-    return PLAYER_ERROR_DECODE;
+    return error;
   }
-  if (!rate_supported(header.sample_rate) ||
-      (header.bits_per_sample != 16 && header.bits_per_sample != 24) ||
-      (header.channels != 1 && header.channels != 2)) {
-    dec_close_source();
-    return PLAYER_ERROR_UNSUPPORTED;
-  }
-  if (fseek(d->file, 0, SEEK_SET) != 0) {
-    dec_close_source();
-    return PLAYER_ERROR_IO;
-  }
-  // The frame count is kept in 32 bits (over 12 hours at 96 kHz). A longer
-  // file plays, with its length treated as unknown.
-  d->expected =
-      header.total_frames <= UINT32_MAX ? (uint32_t)header.total_frames : 0;
-  d->duration_ms = d->expected ? flac_header_duration_ms(&header) : 0;
 
   esp_audio_simple_dec_cfg_t cfg = {
-      .dec_type = ESP_AUDIO_SIMPLE_DEC_TYPE_FLAC,
+      .dec_type = d->type,
       .dec_cfg = NULL,
       .cfg_size = 0,
       .use_frame_dec = false,
@@ -1021,6 +1135,22 @@ static int dec_learn_format(void) {
   d->channels = info.channel;
   d->frame_bytes = (uint32_t)pcm_bytes_per_sample(d->format) * d->channels;
   d->prefill_bytes = d->rate / (1000 / PREFILL_MS) * d->frame_bytes;
+  if (d->type == ESP_AUDIO_SIMPLE_DEC_TYPE_MP3 && d->duration_ms == 0 &&
+      info.bitrate > 0) {
+    // An MP3 with no Xing/Info header: estimate its length as the audio
+    // bytes at the bit rate of the frame just decoded. That is right for a
+    // constant bit rate file and can be far out for a variable one. It is
+    // still in time for STARTED, which waits for the prefill.
+    //
+    // The library's header says the rate is in bits per second, but its MP3
+    // decoder reports kilobits (192 for a 192 kbps file; measured with
+    // esp_audio_codec 2.6.2). No MP3 frame is below 8000 bits per second or
+    // above 320 kilobits, so the two cannot be confused.
+    uint32_t bits_per_s =
+        info.bitrate < 1000 ? info.bitrate * 1000 : info.bitrate;
+    uint64_t ms = (uint64_t)(d->audio_end - d->audio_start) * 8000 / bits_per_s;
+    d->duration_ms = ms > UINT32_MAX ? UINT32_MAX : (uint32_t)ms;
+  }
   d->format_known = true;
   atomic_store(&s_rate, d->rate);
   return NO_ERROR;
