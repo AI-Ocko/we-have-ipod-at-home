@@ -132,11 +132,14 @@ components/
     playlists.c/.h    M3U read/write and edit operations
     textentry.c/.h    multi-tap text input state machine
     menu.c/.h         list navigation model (cursor, scrolling, letter jump)
+    screen.c/.h       in-memory 16x2 frame; diff to the fewest LCD writes
+    keys.c/.h         raw keypad scans to key events (debounce, long, repeat)
+    keytest.c/.h      contents of the keypad test screen
   dap_hw/           ESP-IDF dependent drivers
     storage.c/.h      SD mount/unmount and retry
     audio_out.c/.h    I2S setup, reconfiguration, clean stop
     lcd.c/.h          HD44780 over PCF8574
-    keypad.c/.h       matrix scan and key events
+    keypad.c/.h       matrix scan and the scanning task
 test/host/          CMake project: builds dap_core with gcc and runs Unity tests
 reference/          the original example main file, Kconfig and sd_card
                     component, kept unbuilt for reference
@@ -431,8 +434,11 @@ playlist.
 | # | Options for highlighted item | Options for current track |
 
 Key events: press, long press (held 600 ms), repeat (every 150 ms after a long
-press, dropping to 50 ms after 2 seconds), release. Debounce: 3 consecutive
-matching scans. Only one key at a time is recognised.
+press, dropping to 50 ms once the key has been held 2 seconds), release.
+Debounce: 3 consecutive matching scans. Only one key at a time is recognised:
+a second key pressed while one is held is ignored until the first is released
+(then it registers, so rolling from key to key works), and several keys going
+down together from rest produce nothing until all are released.
 
 On Now Playing, 4 and 6 act on release if no long press occurred, so holding
 to seek does not also skip a track.
