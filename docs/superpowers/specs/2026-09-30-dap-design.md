@@ -257,7 +257,10 @@ grouping instead of artist.
   ROM shows other glyphs for those two codes).
 - Accented Latin letters (Latin-1 and Latin Extended-A) map to their base
   letter; `ß` → `ss`, `æ` → `ae`, `ø` → `o`.
-- Everything else becomes `?`.
+- Common typographic punctuation maps to ASCII: curly quotes to `'` and `"`,
+  dashes to `-`, the ellipsis to `...`, the bullet to `*`, the non-breaking
+  space to a space.
+- Everything else, including any invalid UTF-8 byte, becomes `?`.
 
 If more than half of a title converts to `?`, the file name (converted the same
 way) is used instead. The index stores the already-converted text, so
