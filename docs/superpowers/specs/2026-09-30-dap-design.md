@@ -287,6 +287,10 @@ restarts from `target_ms`.
 
 **Decision:** FLAC seeks using method B (reset, replay header, jump). Stage 3 implements SEEK_REL and start_ms for FLAC this way; stage 8 adds fast-forward, rewind and mid-track resume.
 
+Confirmed by ear on 2026-09-30: the jumps for methods B and D are clean cuts
+with no noise. Not yet measured: the cost of replaying the header for files
+with large embedded cover art, and behaviour on more than one file.
+
 **MP3:** not yet tested; the MP3 parser resynchronises on frame headers, so a
 byte-offset jump after `esp_audio_simple_dec_reset()` is expected to work.
 Stage 3 verifies it when MP3 playback is added.
