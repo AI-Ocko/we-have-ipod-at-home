@@ -2,6 +2,14 @@
 
 #include <string.h>
 
+// screen_diff writes into runs[] without a bounds check. Runs on a row start
+// at least SCREEN_MERGE_GAP + 2 cells apart, which caps how many a row can
+// hold; this keeps SCREEN_MAX_RUNS in step if any of the constants change.
+_Static_assert(SCREEN_MAX_RUNS >=
+                   SCREEN_ROWS * ((SCREEN_COLS + SCREEN_MERGE_GAP + 1) /
+                                  (SCREEN_MERGE_GAP + 2)),
+               "SCREEN_MAX_RUNS is too small for the worst-case screen_diff");
+
 void screen_clear(screen_t *s) { memset(s->cells, ' ', sizeof(s->cells)); }
 
 void screen_put(screen_t *s, int row, int col, const char *text) {

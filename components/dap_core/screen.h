@@ -9,14 +9,16 @@
 #define SCREEN_ROWS 2
 #define SCREEN_COLS 16
 
-// Most runs screen_diff can produce: each run is followed by at least
-// SCREEN_MERGE_GAP + 1 unchanged cells, so at most four fit on a row.
-#define SCREEN_MAX_RUNS 8
+// Most runs screen_diff can produce: runs on a row start at least
+// SCREEN_MERGE_GAP + 2 cells apart, so at most six fit on a row.
+#define SCREEN_MAX_RUNS 12
 
 // Two changed stretches separated by this many unchanged cells or fewer are
-// sent as one run. Moving the LCD's cursor costs as much as sending one
-// character and needs its own I2C transfer, so bridging a short gap is cheaper.
-#define SCREEN_MERGE_GAP 2
+// sent as one run. A whole update goes to the LCD in one I2C transfer, where
+// starting a new run costs one cursor move, the same as sending one
+// character. Bridging a single unchanged cell therefore costs no more than
+// jumping it and keeps the run count down; a wider gap is cheaper to jump.
+#define SCREEN_MERGE_GAP 1
 
 // Cells hold LCD character codes. Codes 8..15 show the LCD's eight
 // user-defined characters (the same glyphs as codes 0..7, which cannot be

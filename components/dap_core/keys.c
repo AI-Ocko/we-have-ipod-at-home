@@ -71,6 +71,14 @@ bool keys_update(keys_t *k, uint16_t raw, uint32_t now_ms, key_event_t *event) {
     return emit(event, KEY_RELEASE, index);
   }
 
+  // The latest scan no longer shows the key, so it may be lifting; debounce
+  // has not decided yet. Fire nothing meanwhile, or letting go would produce
+  // one more repeat (or a late long press) after the finger has left the key.
+  // The timers keep running: if this was only a bounce they carry on as before.
+  if (!(raw & (1u << k->active))) {
+    return false;
+  }
+
   // Unsigned subtraction gives the right answer across a clock wrap-around.
   uint32_t held = now_ms - k->pressed_at;
   if (!k->long_sent) {

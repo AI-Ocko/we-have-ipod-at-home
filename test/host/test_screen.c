@@ -99,21 +99,21 @@ static void test_diff_only_the_changed_digits_of_a_counter(void) {
 
 static void test_diff_merges_across_a_short_gap(void) {
   both_blank();
-  screen_put(&wanted, 0, 2, "x"); // changed at 2 and 5: two unchanged between
-  screen_put(&wanted, 0, 5, "x");
+  screen_put(&wanted, 0, 2, "x"); // changed at 2 and 4: one unchanged between
+  screen_put(&wanted, 0, 4, "x");
   TEST_ASSERT_EQUAL_INT(1, screen_diff(&shown, &wanted, runs));
   TEST_ASSERT_EQUAL_UINT8(2, runs[0].col);
-  TEST_ASSERT_EQUAL_UINT8(4, runs[0].len);
+  TEST_ASSERT_EQUAL_UINT8(3, runs[0].len);
 }
 
 static void test_diff_splits_across_a_long_gap(void) {
   both_blank();
-  screen_put(&wanted, 0, 2, "x"); // changed at 2 and 6: three unchanged between
-  screen_put(&wanted, 0, 6, "x");
+  screen_put(&wanted, 0, 2, "x"); // changed at 2 and 5: two unchanged between
+  screen_put(&wanted, 0, 5, "x");
   TEST_ASSERT_EQUAL_INT(2, screen_diff(&shown, &wanted, runs));
   TEST_ASSERT_EQUAL_UINT8(2, runs[0].col);
   TEST_ASSERT_EQUAL_UINT8(1, runs[0].len);
-  TEST_ASSERT_EQUAL_UINT8(6, runs[1].col);
+  TEST_ASSERT_EQUAL_UINT8(5, runs[1].col);
   TEST_ASSERT_EQUAL_UINT8(1, runs[1].len);
 }
 
@@ -146,7 +146,10 @@ static void test_diff_worst_case_fits_in_max_runs(void) {
   }
   TEST_ASSERT_EQUAL_INT(SCREEN_MAX_RUNS, screen_diff(&shown, &wanted, runs));
   TEST_ASSERT_EQUAL_UINT8(1, runs[SCREEN_MAX_RUNS - 1].row);
-  TEST_ASSERT_EQUAL_UINT8(12, runs[SCREEN_MAX_RUNS - 1].col);
+  TEST_ASSERT_EQUAL_UINT8(15, runs[SCREEN_MAX_RUNS - 1].col);
+  for (int i = 0; i < SCREEN_MAX_RUNS; i++) {
+    TEST_ASSERT_EQUAL_UINT8(1, runs[i].len);
+  }
 }
 
 static void test_diff_runs_cover_every_changed_cell(void) {

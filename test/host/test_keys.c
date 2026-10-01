@@ -33,6 +33,15 @@ static int count_events(uint16_t raw, uint32_t ms, key_event_type_t type) {
   return n;
 }
 
+// Scan `raw` for `ms` milliseconds and count the events of every type.
+static int count_any_events(uint16_t raw, uint32_t ms) {
+  int n = 0;
+  for (uint32_t t = 0; t < ms; t += SCAN_MS) {
+    n += scan(raw) ? 1 : 0;
+  }
+  return n;
+}
+
 // Hold `raw` until the press is reported. Fails the test if it never is.
 static void press(uint16_t raw) {
   for (int i = 0; i < KEYS_DEBOUNCE_SCANS; i++) {
@@ -149,6 +158,33 @@ static void test_release_after_a_long_hold_stops_repeats(void) {
   TEST_ASSERT_EQUAL_INT(0, count_events(0, 1000, KEY_REPEAT));
 }
 
+static void test_no_repeat_fires_once_the_key_has_lifted(void) {
+  press(KEY_5);
+  count_events(KEY_5, 2500, KEY_REPEAT); // held 2500 ms; last repeat at 2500
+  // The next repeat is due at 2550 ms.
+  for (int i = 0; i < 4; i++) {
+    TEST_ASSERT_FALSE(scan(KEY_5)); // 2510 .. 2540 ms
+  }
+  // The key lifts on the very scan the repeat is due. Debounce still counts
+  // the key as down for two more scans, but nothing may fire in that time.
+  TEST_ASSERT_FALSE(scan(0)); // 2550 ms
+  TEST_ASSERT_FALSE(scan(0));
+  TEST_ASSERT_TRUE(scan(0));
+  TEST_ASSERT_EQUAL_INT(KEY_RELEASE, ev.type);
+  TEST_ASSERT_EQUAL_CHAR('5', ev.key);
+}
+
+static void test_a_tap_lifted_just_before_600_ms_is_not_a_long_press(void) {
+  press(KEY_5);
+  TEST_ASSERT_EQUAL_INT(0, count_any_events(KEY_5, 590)); // held 590 ms
+  // The key lifts on the scan where the long press would have fired.
+  TEST_ASSERT_FALSE(scan(0)); // 600 ms
+  TEST_ASSERT_FALSE(scan(0));
+  TEST_ASSERT_TRUE(scan(0));
+  TEST_ASSERT_EQUAL_INT(KEY_RELEASE, ev.type);
+  TEST_ASSERT_EQUAL_CHAR('5', ev.key);
+}
+
 static void test_second_key_while_one_is_held_is_ignored(void) {
   press(KEY_5);
   for (int i = 0; i < 30; i++) {
@@ -209,6 +245,8 @@ int main(void) {
   RUN_TEST(test_repeat_every_150_ms_after_the_long_press);
   RUN_TEST(test_repeat_speeds_up_after_two_seconds);
   RUN_TEST(test_release_after_a_long_hold_stops_repeats);
+  RUN_TEST(test_no_repeat_fires_once_the_key_has_lifted);
+  RUN_TEST(test_a_tap_lifted_just_before_600_ms_is_not_a_long_press);
   RUN_TEST(test_second_key_while_one_is_held_is_ignored);
   RUN_TEST(test_rolling_from_one_key_to_the_next);
   RUN_TEST(test_two_keys_together_from_rest_give_nothing);

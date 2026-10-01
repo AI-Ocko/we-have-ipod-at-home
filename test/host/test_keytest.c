@@ -44,9 +44,13 @@ static void test_count_rolls_over_instead_of_overflowing_the_row(void) {
 }
 
 static void test_glyph_is_a_five_pixel_wide_bitmap(void) {
+  unsigned char any = 0;
   for (int i = 0; i < 8; i++) {
     TEST_ASSERT_EQUAL_HEX8(0, KEYTEST_GLYPH[i] & 0xE0);
+    any |= KEYTEST_GLYPH[i];
   }
+  // A blank glyph would be indistinguishable from a space on the LCD.
+  TEST_ASSERT_NOT_EQUAL_HEX8(0, any);
 }
 
 int main(void) {
