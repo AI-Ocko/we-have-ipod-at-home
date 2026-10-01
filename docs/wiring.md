@@ -22,18 +22,20 @@ The SD card slot is built into the board (pins 14, 15 and 2 internally).
 
 ## LCD (LCD1602 with I2C backpack)
 
-| Pin label on the backpack | ESP32 pin |
-|---|---|
-| GND | GND |
-| VCC | 5V |
-| SDA | 21 |
-| SCL | 27 |
+| Pin label on the LCD | Also seen labelled | ESP32 pin |
+|---|---|---|
+| VSS | GND | GND |
+| VDD | VCC | 5V |
+| SDA | SDA | 21 |
+| SCK | SCL | 27 |
 
-SCL goes to **27**, not 22 as in Freenove's tutorial: 22 is the DAC's data
-line. 5V goes to the LCD's VCC and nowhere else.
+The clock wire goes to **27**, not 22 as in Freenove's tutorial: 22 is the
+DAC's data line. 5V goes to the LCD's VDD and nowhere else.
 
-If the backlight is on but no text shows, turn the small blue screw on the
-back of the LCD (the contrast adjuster) until characters appear.
+The LCD must be on 5V. On 3.3V the backlight lights and the firmware finds
+the LCD, but no text is visible. (Verified on this module, which has no
+contrast adjuster. Modules that have a small screw on the back may also need
+it turned before text appears.)
 
 ## Keypad (4x4 membrane)
 
