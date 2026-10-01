@@ -1,0 +1,91 @@
+ets Jul 29 2019 12:21:46
+
+rst:0x1 (POWERON_RESET),boot:0x1b (SPI_FAST_FLASH_BOOT)
+configsip: 0, SPIWP:0xee
+clk_drv:0x00,q_drv:0x00,d_drv:0x00,cs0_drv:0x00,hd_drv:0x00,wp_drv:0x00
+mode:DIO, clock div:2
+load:0x3fff0040,len:6272
+load:0x40078000,len:15820
+load:0x40080400,len:3920
+entry 0x40080644
+I (27) boot: ESP-IDF v6.0.2 2nd stage bootloader
+I (27) boot: compile time Sep 30 2026 16:04:25
+I (28) boot: Multicore bootloader
+I (29) boot: chip revision: v3.1
+I (32) boot.esp32: SPI Speed      : 40MHz
+I (35) boot.esp32: SPI Mode       : DIO
+I (39) boot.esp32: SPI Flash Size : 4MB
+I (42) boot: Enabling RNG early entropy source...
+I (47) boot: Partition Table:
+I (49) boot: ## Label            Usage          Type ST Offset   Length
+I (56) boot:  0 nvs              WiFi data        01 02 00009000 00006000
+I (62) boot:  1 phy_init         RF data          01 01 0000f000 00001000
+I (69) boot:  2 factory          factory app      00 00 00010000 00100000
+I (75) boot: End of partition table
+I (79) esp_image: segment 0: paddr=00010020 vaddr=3f400020 size=4a328h (303912) map
+I (194) esp_image: segment 1: paddr=0005a350 vaddr=3ffb0000 size=02ebch ( 11964) load
+I (199) esp_image: segment 2: paddr=0005d214 vaddr=40080000 size=02e04h ( 11780) load
+I (204) esp_image: segment 3: paddr=00060020 vaddr=400d0020 size=793cch (496588) map
+I (383) esp_image: segment 4: paddr=000d93f4 vaddr=40082e04 size=0d338h ( 54072) load
+I (405) esp_image: segment 5: paddr=000e6734 vaddr=50000000 size=00028h (    40) load
+I (414) boot: Loaded app from partition at offset 0x10000
+I (414) boot: Disabling RNG early entropy source...
+I (425) quad_psram: This chip is ESP32-D0WD
+I (427) esp_psram: Found 8MB PSRAM device
+I (427) esp_psram: Speed: 40MHz
+I (427) esp_psram: PSRAM initialized, cache is in low/high (2-core) mode.
+W (433) esp_psram: Virtual address not enough for PSRAM, map as much as we can. 4MB is mapped
+I (441) cpu_start: Multicore app
+I (1349) esp_psram: SPI SRAM memory test OK
+I (1357) cpu_start: GPIO 3 and 1 are used as console UART I/O pins
+I (1358) cpu_start: Pro cpu start user code
+I (1358) cpu_start: cpu freq: 160000000 Hz
+I (1360) app_init: Application information:
+I (1364) app_init: Project name:     sd_card
+I (1368) app_init: App version:      1
+I (1371) app_init: Compile time:     Sep 30 2026 16:04:28
+I (1376) app_init: ELF file SHA256:  88428b370...
+I (1381) app_init: ESP-IDF:          v6.0.2
+I (1384) efuse_init: Min chip rev:     v0.0
+I (1388) efuse_init: Max chip rev:     v3.99 
+I (1392) efuse_init: Chip rev:         v3.1
+I (1397) heap_init: Initializing. RAM available for dynamic allocation:
+I (1403) heap_init: At 3FFAE6E0 len 00001920 (6 KiB): DRAM
+I (1408) heap_init: At 3FFB3DE8 len 0002C218 (176 KiB): DRAM
+I (1413) heap_init: At 3FFE0440 len 00003AE0 (14 KiB): D/IRAM
+I (1419) heap_init: At 3FFE4350 len 0001BCB0 (111 KiB): D/IRAM
+I (1424) heap_init: At 4009013C len 0000FEC4 (63 KiB): IRAM
+I (1430) esp_psram: Adding pool of 4096K of PSRAM memory to heap allocator
+I (1438) spi_flash: detected chip: generic
+I (1440) spi_flash: flash io: dio
+I (1445) main_task: Started on CPU0
+I (1445) esp_psram: Reserving pool of 32K of internal memory for DMA/internal allocations
+I (1455) main_task: Calling app_main()
+I (1455) example: Initializing SD card
+I (1455) example: Using SDMMC peripheral
+I (1465) example: Mounting filesystem
+W (1515) SD_HOST: esp32 doesn't support input phase delay, fallback to 0 delay
+W (1515) SD_HOST: input line delay not supported, fallback to 0 delay
+I (1515) example: Filesystem mounted
+I (1525) example: <dir>             0  music
+I (1525) example:                  13  nihao.txt
+I (1525) example:                  13  foo.txt
+I (1535) example: <dir>             0  .Trash-1000
+I (1535) example:            21945585  Clay Pigeons.flac
+Name: APPSD
+Type: SDSC
+Speed: 20.00 MHz (limit: 20.00 MHz)
+Size: 960MB
+CSD: ver=1, sector_size=512, capacity=1966080 read_bl_len=10
+SSR: bus_width=1
+I (1555) example: Opening file /sdcard/nihao.txt
+I (1575) example: File written
+I (1575) example: Reading file /sdcard/nihao.txt
+I (1575) example: Read from file: 'Nihao APPSD!'
+I (1585) example: Playing /sdcard/Clay Pigeons.flac
+I (1585) ESP_ES_PARSER: The version of es_parser is v1.0.1
+I (1605) AUD_Dec_Parse: FLAC sample_rate 44100 duration:255440 max_frame:10507
+I (1745) example: FLAC: 44100 Hz, 2 channels, 16 bits
+E (5695) AUD_Dec_Parse: Not found frame in max frame size 10507
+I (254695) example: Finished: 2718 blocks decoded
+I (254775) main_task: Returned from app_main()
