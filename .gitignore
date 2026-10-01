@@ -1,0 +1,8 @@
+# Build output and tool caches
+build/
+.cache/
+managed_components/
+
+# Local config backups
+sdkconfig.old
+sdkconfig.bak-*
