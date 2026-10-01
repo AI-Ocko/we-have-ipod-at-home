@@ -8,6 +8,8 @@
 
 **Tech Stack:** ESP-IDF v6.0.2 (C), `i2c_master` driver, GPIO driver, FreeRTOS queues and tasks, Unity 2.6 host tests under AddressSanitizer.
 
+**Amended during execution:** the code listings for Tasks 1 and 2 predate their review fix round (merge gap 1, `SCREEN_MAX_RUNS` 12, key timers paused while a release is being debounced). The repository is authoritative for those files. Task 3's `lcd_show` below already reflects the change: one I2C transfer per update.
+
 **Spec:** `docs/superpowers/specs/2026-09-30-dap-design.md` (read section 2, section 3 including "Performance rules", section 9 "Keys", section 11, and stage 2 of section 14).
 
 ## Global Constraints
@@ -68,7 +70,7 @@ There is a **wiring pause between Task 3 and Task 4**: Task 3 is verified with n
 
 **Interfaces:**
 - Produces:
-  - `#define SCREEN_ROWS 2`, `SCREEN_COLS 16`, `SCREEN_MAX_RUNS 8`, `SCREEN_MERGE_GAP 2`
+  - `#define SCREEN_ROWS 2`, `SCREEN_COLS 16`, `SCREEN_MAX_RUNS 12`, `SCREEN_MERGE_GAP 1` (after the fix round)
   - `typedef struct { char cells[SCREEN_ROWS][SCREEN_COLS]; } screen_t;`
   - `typedef struct { uint8_t row; uint8_t col; uint8_t len; } screen_run_t;`
   - `void screen_clear(screen_t *s);`
@@ -1332,6 +1334,9 @@ esp_err_t lcd_show(const screen_t *wanted) {
   int count;
   if (s_shown_valid) {
     count = screen_diff(&s_shown, wanted, runs);
+    if (count == 0) {
+      return ESP_OK; // nothing changed: no I2C traffic at all
+    }
   } else {
     // A previous transfer failed part-way, so the LCD's contents are unknown.
     // Send both rows in full.
@@ -1342,23 +1347,27 @@ esp_err_t lcd_show(const screen_t *wanted) {
     count = SCREEN_ROWS;
   }
 
+  // The whole update goes out as one I2C transfer: for each run, a cursor
+  // move followed by its characters. Sized for the worst case, every cell
+  // plus one cursor move per run.
+  uint8_t buf[BYTES_PER_LCD_BYTE *
+              (SCREEN_MAX_RUNS + SCREEN_ROWS * SCREEN_COLS)];
+  size_t len = 0;
   for (int i = 0; i < count; i++) {
-    // One transfer per run: move the cursor, then the characters.
-    uint8_t buf[BYTES_PER_LCD_BYTE * (1 + SCREEN_COLS)];
     uint8_t address =
         (uint8_t)((runs[i].row ? ROW_1_ADDRESS : 0) + runs[i].col);
-    size_t len = append_byte(buf, 0, CMD_SET_DDRAM | address, 0);
+    len = append_byte(buf, len, CMD_SET_DDRAM | address, 0);
     const char *cells = &wanted->cells[runs[i].row][runs[i].col];
     for (int c = 0; c < runs[i].len; c++) {
       len = append_byte(buf, len, (uint8_t)cells[c], BIT_RS);
     }
-    esp_err_t err = i2c_master_transmit(s_dev, buf, len, I2C_TIMEOUT_MS);
-    if (err != ESP_OK) {
-      s_shown_valid = false;
-      return err;
-    }
   }
 
+  esp_err_t err = i2c_master_transmit(s_dev, buf, len, I2C_TIMEOUT_MS);
+  if (err != ESP_OK) {
+    s_shown_valid = false;
+    return err;
+  }
   s_shown = *wanted;
   s_shown_valid = true;
   return ESP_OK;
