@@ -14,4 +14,9 @@ dependencies:
   #   # `public` flag doesn't have an effect dependencies of the `main` component.
   #   # All dependencies of `main` are public by default.
   #   public: true
-  espressif/esp_audio_codec: ^2.6.2
+  # Exactly this version, not "compatible with": player.c links to a function
+  # the library exports but declares in no header (esp_flac_dec_parse_frame),
+  # and its decode loop depends on how this version's FLAC parser behaves,
+  # found by investigation (docs/superpowers/plans/stage3-*-investigation.md).
+  # Moving to another version means repeating those checks.
+  espressif/esp_audio_codec: "==2.6.2"

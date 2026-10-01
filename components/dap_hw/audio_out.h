@@ -11,6 +11,21 @@
 #define AUDIO_OUT_RATE_MIN 8000
 #define AUDIO_OUT_RATE_MAX 96000
 
+// The link's DMA ring: AUDIO_OUT_BLOCKS buffers of AUDIO_OUT_BLOCK_FRAMES
+// frames each. The DMA goes round the ring for ever, and a write fills the
+// buffer that was sent longest ago, so a frame written now leaves for the DAC
+// up to one whole ring (AUDIO_OUT_BLOCKS x AUDIO_OUT_BLOCK_FRAMES frames)
+// later. Two things follow for the caller:
+//
+// - Before the link is stopped at the end of a track, write one ring's worth
+//   of silence after the last real frame. A write waits for buffers to be
+//   sent, so once that silence has been accepted every real frame has gone.
+// - Writing whole blocks (a multiple of AUDIO_OUT_BLOCK_FRAMES frames at a
+//   time) keeps each write lined up with one DMA buffer, so no buffer is ever
+//   left half filled while the writer waits for more data.
+#define AUDIO_OUT_BLOCK_FRAMES 500
+#define AUDIO_OUT_BLOCKS 16
+
 typedef struct {
   int bck;  // bit clock
   int lrck; // left/right (word select) clock
@@ -30,6 +45,7 @@ esp_err_t audio_out_start(uint32_t sample_rate);
 // are queued.
 esp_err_t audio_out_write(const int32_t *samples, size_t frames);
 
-// Play out what is queued, then shut the link down. Does nothing if output is
-// not running.
+// Shut the link down: a little silence, a short wait, then the clocks stop.
+// Frames still waiting in the DMA ring are NOT played (see above for how to
+// let them out first). Does nothing if output is not running.
 void audio_out_stop(void);

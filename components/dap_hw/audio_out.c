@@ -28,8 +28,8 @@ static esp_err_t create_channel(const i2s_std_clk_config_t *clk_cfg) {
   // most 4092 bytes, and a 32-bit stereo frame is 8 bytes, so 511 frames is
   // the most one can carry. The buffers cost 16 x 4000 = 64000 bytes of
   // internal DMA-capable RAM.
-  chan_cfg.dma_desc_num = 16;
-  chan_cfg.dma_frame_num = 500;
+  chan_cfg.dma_desc_num = AUDIO_OUT_BLOCKS;
+  chan_cfg.dma_frame_num = AUDIO_OUT_BLOCK_FRAMES;
   // If the writer falls behind, send silence. Without this the DMA goes
   // round its ring again and replays stale buffers. The driver zeroes each
   // buffer once it has been sent (`auto_clear` is this field's older name).
@@ -115,7 +115,9 @@ esp_err_t audio_out_write(const int32_t *samples, size_t frames) {
 }
 
 // Stop cleanly: end on silence so the DAC is not left holding the last
-// sample, then disable the channel so nothing more is clocked out.
+// sample, then disable the channel so nothing more is clocked out. This does
+// not wait for the DMA ring to empty: a caller that wants the last frames
+// heard writes a ring of silence first (see audio_out.h).
 void audio_out_stop(void) {
   if (!s_running) {
     return;
