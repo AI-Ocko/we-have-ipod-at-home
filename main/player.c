@@ -7,6 +7,7 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "flac_header.h"
+#include "pcm.h"
 #include <inttypes.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -14,16 +15,48 @@
 #define FLAC_IN_CHUNK 32768       // must exceed the largest FLAC frame (~10KB here)
 #define FLAC_OUT_INIT (32 * 1024) // starting PCM buffer; grown if a block needs more
 
+// The smallest frame the decoder can hand over is one 16-bit mono sample.
+// Sizing the converted buffer for that case means a decoded block always
+// fits, whatever format the file turns out to have.
+#define PCM_MIN_FRAME_BYTES 2
+
+// The volume level everything plays at, 0..PCM_VOLUME_MAX. It stands in until
+// the volume control arrives in the next task: 10 is the level the player
+// will start at, 20 dB below full scale.
+#define PLAYER_DEFAULT_VOLUME 10
+
 static const char *TAG = "player";
+
+// Allocate the two PCM buffers of a track: `out_len` bytes for what the
+// decoder returns, and room for the same block as 32-bit stereo frames (8
+// bytes each, so four times `out_len`). Neither touches DMA, so both can live
+// in PSRAM. On failure both pointers are NULL.
+static bool alloc_pcm_buffers(uint32_t out_len, uint8_t **out, int32_t **pcm,
+                              size_t *pcm_frames_max) {
+  size_t frames = out_len / PCM_MIN_FRAME_BYTES;
+  *out = heap_caps_malloc(out_len, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  *pcm = heap_caps_malloc(frames * 2 * sizeof(int32_t),
+                          MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (!*out || !*pcm) {
+    heap_caps_free(*out);
+    heap_caps_free(*pcm);
+    *out = NULL;
+    *pcm = NULL;
+    return false;
+  }
+  *pcm_frames_max = frames;
+  return true;
+}
 
 void player_init(void) {
   esp_audio_dec_register_default();        // the codecs themselves
   esp_audio_simple_dec_register_default(); // the container parsers on top
 }
 
-// Read the file in chunks, hand them to the decoder, push the PCM it returns
-// straight at the DAC. The I2S link is set up lazily, once the decoder has
-// told us the file's real sample rate and channel count.
+// Read the file in chunks, hand them to the decoder, convert each block it
+// returns to 32-bit stereo, scale it to the volume and push that at the DAC.
+// The I2S link is set up lazily, once the decoder has told us the file's real
+// sample rate and format.
 esp_err_t player_play_file(const char *path) {
   FILE *f = fopen(path, "rb");
   if (!f) {
@@ -63,17 +96,20 @@ esp_err_t player_play_file(const char *path) {
   esp_err_t result = ESP_FAIL;
   bool started = false;
   bool eof = false;
-  uint64_t bytes_out = 0;   // PCM bytes sent to the DAC
-  uint32_t frame_bytes = 0; // bytes in one PCM frame, known once playing
+  uint64_t frames_out = 0;           // frames sent to the DAC
+  pcm_format_t format = PCM_FMT_S16; // this and `channels`: known once playing
+  int channels = 0;
+  const int32_t gain = pcm_volume_gain(PLAYER_DEFAULT_VOLUME);
 
   // The input buffer receives data straight from the SD card, so it must be
   // internal DMA-capable RAM: the ESP32's SDMMC DMA cannot reach PSRAM.
-  // The decoded PCM never touches DMA, so that one can live in PSRAM.
   uint8_t *in =
       heap_caps_malloc(FLAC_IN_CHUNK, MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
   uint32_t out_len = FLAC_OUT_INIT;
-  uint8_t *out = heap_caps_malloc(out_len, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-  if (!in || !out) {
+  uint8_t *out = NULL;       // what the decoder returns
+  int32_t *pcm = NULL;       // the same block as 32-bit stereo frames
+  size_t pcm_frames_max = 0; // frames `pcm` holds
+  if (!alloc_pcm_buffers(out_len, &out, &pcm, &pcm_frames_max) || !in) {
     ESP_LOGE(TAG, "Out of memory for decode buffers");
     result = ESP_ERR_NO_MEM;
     goto done;
@@ -100,11 +136,12 @@ esp_err_t player_play_file(const char *path) {
       esp_audio_err_t err = esp_audio_simple_dec_process(dec, &raw, &frame);
 
       if (err == ESP_AUDIO_ERR_BUFF_NOT_ENOUGH) {
-        // A FLAC block was bigger than our buffer; grow and retry.
+        // A FLAC block was bigger than our buffer; grow and retry. The
+        // converted buffer grows with it so the block still fits.
         heap_caps_free(out);
+        heap_caps_free(pcm);
         out_len = frame.needed_size;
-        out = heap_caps_malloc(out_len, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-        if (!out) {
+        if (!alloc_pcm_buffers(out_len, &out, &pcm, &pcm_frames_max)) {
           ESP_LOGE(TAG, "Out of memory growing to %" PRIu32, out_len);
           result = ESP_ERR_NO_MEM;
           goto done;
@@ -120,28 +157,48 @@ esp_err_t player_play_file(const char *path) {
       if (frame.decoded_size > 0) {
         if (!started) {
           esp_audio_simple_dec_info_t info;
-          esp_audio_simple_dec_get_info(dec, &info);
+          if (esp_audio_simple_dec_get_info(dec, &info) != ESP_AUDIO_ERR_OK) {
+            ESP_LOGE(TAG, "The decoder did not report the stream format");
+            goto done;
+          }
           ESP_LOGI(TAG, "FLAC: %" PRIu32 " Hz, %d channels, %d bits",
                    info.sample_rate, info.channel, info.bits_per_sample);
-          esp_err_t start_err = audio_out_start(info.sample_rate, info.channel,
-                                                info.bits_per_sample);
+          // The decoder packs samples: 2 bytes for 16-bit, 3 for 24-bit.
+          if (info.bits_per_sample == 16) {
+            format = PCM_FMT_S16;
+          } else if (info.bits_per_sample == 24) {
+            format = PCM_FMT_S24_PACKED;
+          } else {
+            ESP_LOGE(TAG, "Unsupported sample size: %d bits",
+                     info.bits_per_sample);
+            result = ESP_ERR_NOT_SUPPORTED;
+            goto done;
+          }
+          if (info.channel != 1 && info.channel != 2) {
+            ESP_LOGE(TAG, "Unsupported channel count: %d", info.channel);
+            result = ESP_ERR_NOT_SUPPORTED;
+            goto done;
+          }
+          channels = info.channel;
+          esp_err_t start_err = audio_out_start(info.sample_rate);
           if (start_err != ESP_OK) {
             ESP_LOGE(TAG, "Cannot start audio output (%s)",
                      esp_err_to_name(start_err));
             result = start_err;
             goto done;
           }
-          // The decoder packs samples: 2 bytes for 16-bit, 3 for 24-bit.
-          frame_bytes = (uint32_t)info.channel * (info.bits_per_sample / 8);
           started = true;
         }
-        esp_err_t write_err = audio_out_write(out, frame.decoded_size);
+        size_t frames = pcm_to_s32_stereo(out, frame.decoded_size, format,
+                                          channels, pcm, pcm_frames_max);
+        pcm_apply_gain(pcm, frames, gain, gain);
+        esp_err_t write_err = audio_out_write(pcm, frames);
         if (write_err != ESP_OK) {
           ESP_LOGE(TAG, "Audio write failed (%s)", esp_err_to_name(write_err));
           result = write_err;
           goto done;
         }
-        bytes_out += frame.decoded_size;
+        frames_out += frames;
       }
 
       // Guard against spinning forever if the decoder stops making progress.
@@ -156,8 +213,8 @@ esp_err_t player_play_file(const char *path) {
       raw.len -= raw.consumed;
     }
   }
-  ESP_LOGI(TAG, "ENDED frames=%" PRIu64 " expected=%" PRIu64,
-           frame_bytes ? bytes_out / frame_bytes : 0, expected);
+  ESP_LOGI(TAG, "ENDED frames=%" PRIu64 " expected=%" PRIu64, frames_out,
+           expected);
   result = ESP_OK;
 
 done:
@@ -167,6 +224,7 @@ done:
   esp_audio_simple_dec_close(dec);
   heap_caps_free(in);
   heap_caps_free(out);
+  heap_caps_free(pcm);
   fclose(f);
   return result;
 }
