@@ -54,9 +54,14 @@ static bool s_shown_valid;
 static uint8_t s_glyphs[GLYPH_COUNT][GLYPH_ROWS];
 static uint8_t s_glyph_mask;
 
-// Wait at least `ms`. vTaskDelay rounds down to whole ticks and the first
-// tick may be almost over already, so add one.
-static void wait_ms(uint32_t ms) { vTaskDelay(pdMS_TO_TICKS(ms) + 1); }
+// Wait at least `ms`. vTaskDelay counts tick boundaries, not elapsed time, so
+// two adjustments are needed. Round up to whole ticks, because part of a tick
+// still has to be waited for (and a tick is 10 ms, so most of the delays here
+// would otherwise round down to none). Then add one, because the current
+// tick may be almost over and the first boundary can come at once.
+static void wait_ms(uint32_t ms) {
+  vTaskDelay((ms + portTICK_PERIOD_MS - 1) / portTICK_PERIOD_MS + 1);
+}
 
 // Every transfer to the LCD goes through here. A failure means the LCD may
 // have seen only part of a byte, so its state is no longer known: lcd_show
