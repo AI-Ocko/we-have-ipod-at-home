@@ -81,6 +81,30 @@ probes address 0x27, then 0x3F. I2C at 100 kHz using the ESP-IDF v6
 `i2c_master` driver. The expander's backlight bit is used for the backlight
 timeout.
 
+### Power
+
+Found by test on 2026-09-30: with the LCD connected, powering the board from
+a computer's USB port leaves the SD card unresponsive from plug-in (it never
+answers its first command, and stays that way through resets until the card
+itself is re-inserted). Powered from a phone charger, the same board, wiring
+and firmware start correctly every time. The LCD is the load that tips it:
+with the LCD's power wire removed, the computer's port works too. The ESP32
+itself reports a normal power-on in both cases.
+
+The mechanism was not measured. The working explanation is that the weaker
+source lets the 3.3V supply rise badly at plug-in and the card fails its own
+power-on reset.
+
+Consequences:
+
+- The finished player must be powered from a supply at least as stiff as a
+  phone charger. Any future battery design has to be checked against this.
+- During development the board is on a computer's USB port for flashing and
+  logs. After each plug-in there, take the card out and click it back in.
+  From then on it survives resets and flashing.
+- The firmware's card retry (section 11) must make re-inserting the card
+  enough by itself, with no reset needed.
+
 ## 3. Architecture
 
 Four long-running tasks communicate only through queues. No task calls into

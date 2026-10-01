@@ -72,6 +72,13 @@ The keypad test screen shows which key the player thinks was pressed. If
 they do not match, note what each key shows; it is fixed by reordering the
 pin list in `main/pins.h`, not by rewiring.
 
+## Power
+
+Run the player from a phone charger or similar. From a computer's USB port,
+with the LCD connected, the SD card does not start at plug-in. When the board
+has to be on a computer (flashing, reading logs), plug it in, then take the
+card out and click it back in.
+
 ## Pins to leave alone
 
 - **0 and 12**: used by the chip while starting up. 12 held high at reset
