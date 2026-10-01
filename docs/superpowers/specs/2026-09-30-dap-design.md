@@ -270,11 +270,26 @@ Position is counted from frames delivered to I2S, not from file offset.
 
 ### Seeking
 
-`SEEK_REL` and a non-zero `start_ms` depend on the stage-1 feasibility test.
-MP3 seeks by byte offset and resynchronises. For FLAC the test decides between
-(a) byte-offset seek with decoder reset, if the decoder resynchronises
-mid-stream, or (b) no seeking for FLAC. Under (b), FLAC ignores `SEEK_REL`
-and always starts at 0.
+`SEEK_REL` and a non-zero `start_ms` seek by byte offset: the target position
+is `audio_start + (file_size - audio_start) * target_ms / duration_ms`, so the
+landing point is approximate for variable-bitrate audio. Position reporting
+restarts from `target_ms`.
+
+**FLAC (tested 2026-09-30, stage 1, branch `spike/flac-seek`, log in
+`docs/superpowers/plans/stage1-flac-seek.log`):**
+
+| Method | 50% | 90% |
+|---|---|---|
+| A: reset, jump | fail: errors=20 first_err=-7 blocks=0 | fail: errors=20 first_err=-7 blocks=0 |
+| B: reset, replay header, jump | pass: errors=0 first_err=0 blocks=60 | pass: errors=0 first_err=0 blocks=60 |
+| C: reopen, jump | fail: errors=20 first_err=-7 blocks=0 | fail: errors=20 first_err=-7 blocks=0 |
+| D: reopen, replay header, jump | pass: errors=0 first_err=0 blocks=60 | pass: errors=0 first_err=0 blocks=60 |
+
+**Decision:** FLAC seeks using method B (reset, replay header, jump). Stage 3 implements SEEK_REL and start_ms for FLAC this way; stage 8 adds fast-forward, rewind and mid-track resume.
+
+**MP3:** not yet tested; the MP3 parser resynchronises on frame headers, so a
+byte-offset jump after `esp_audio_simple_dec_reset()` is expected to work.
+Stage 3 verifies it when MP3 playback is added.
 
 ## 5. Tags
 
