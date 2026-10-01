@@ -6,6 +6,7 @@
 #include "esp_audio_simple_dec_default.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "flac_header.h"
 #include <inttypes.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -30,6 +31,20 @@ esp_err_t player_play_file(const char *path) {
     return ESP_ERR_NOT_FOUND;
   }
 
+  // The header says how many frames the file holds, so the end-of-track log
+  // can show whether all of them were played. The decoder parses the file
+  // from its first byte, so go back there afterwards.
+  flac_header_t header;
+  uint64_t expected = 0; // 0: the file does not say, or has no usable header
+  if (flac_header_read(f, &header) == FLAC_HEADER_OK) {
+    expected = header.total_frames;
+  }
+  if (fseek(f, 0, SEEK_SET) != 0) {
+    ESP_LOGE(TAG, "Cannot rewind %s", path);
+    fclose(f);
+    return ESP_FAIL;
+  }
+
   esp_audio_simple_dec_cfg_t cfg = {
       .dec_type = ESP_AUDIO_SIMPLE_DEC_TYPE_FLAC,
       .dec_cfg = NULL,
@@ -48,7 +63,8 @@ esp_err_t player_play_file(const char *path) {
   esp_err_t result = ESP_FAIL;
   bool started = false;
   bool eof = false;
-  uint32_t frames_out = 0;
+  uint64_t bytes_out = 0;   // PCM bytes sent to the DAC
+  uint32_t frame_bytes = 0; // bytes in one PCM frame, known once playing
 
   // The input buffer receives data straight from the SD card, so it must be
   // internal DMA-capable RAM: the ESP32's SDMMC DMA cannot reach PSRAM.
@@ -115,6 +131,8 @@ esp_err_t player_play_file(const char *path) {
             result = start_err;
             goto done;
           }
+          // The decoder packs samples: 2 bytes for 16-bit, 3 for 24-bit.
+          frame_bytes = (uint32_t)info.channel * (info.bits_per_sample / 8);
           started = true;
         }
         esp_err_t write_err = audio_out_write(out, frame.decoded_size);
@@ -123,18 +141,23 @@ esp_err_t player_play_file(const char *path) {
           result = write_err;
           goto done;
         }
-        frames_out++;
+        bytes_out += frame.decoded_size;
       }
 
       // Guard against spinning forever if the decoder stops making progress.
-      if (raw.consumed == 0) {
+      // Progress is input taken OR a block returned: when the frames are much
+      // smaller than the file's largest, the parser already holds several, and
+      // it hands them out one per call while taking no new input. Treating
+      // that as a stall threw away the rest of the chunk and skipped audio.
+      if (raw.consumed == 0 && frame.decoded_size == 0) {
         break;
       }
       raw.buffer += raw.consumed;
       raw.len -= raw.consumed;
     }
   }
-  ESP_LOGI(TAG, "Finished: %" PRIu32 " blocks decoded", frames_out);
+  ESP_LOGI(TAG, "ENDED frames=%" PRIu64 " expected=%" PRIu64,
+           frame_bytes ? bytes_out / frame_bytes : 0, expected);
   result = ESP_OK;
 
 done:
