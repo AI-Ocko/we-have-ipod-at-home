@@ -4,6 +4,8 @@
 #include "esp_audio_dec_default.h"
 #include "esp_audio_simple_dec.h"
 #include "esp_audio_simple_dec_default.h"
+#include "esp_audio_simple_dec_reg.h"
+#include "esp_flac_dec.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "flac_header.h"
@@ -48,9 +50,71 @@ static bool alloc_pcm_buffers(uint32_t out_len, uint8_t **out, int32_t **pcm,
   return true;
 }
 
+// The codec library's own FLAC frame parser. It is exported by the library
+// but declared in none of its headers; the signature is the documented
+// esp_es_parse_func_t.
+esp_es_parse_err_t esp_flac_dec_parse_frame(esp_es_parse_raw_t *in,
+                                            esp_es_parse_frame_info_t *info);
+
+// True if p[0..len) ends with the CRC-16 of everything before it, as a
+// complete FLAC frame does (polynomial 0x8005, most significant bit first,
+// stored big-endian). Bit by bit: this runs once per track, on one frame.
+static bool flac_frame_crc_ok(const uint8_t *p, uint32_t len) {
+  if (len < 4) {
+    return false;
+  }
+  uint16_t crc = 0;
+  for (uint32_t i = 0; i < len - 2; i++) {
+    crc ^= (uint16_t)(p[i] << 8);
+    for (int bit = 0; bit < 8; bit++) {
+      crc = (crc & 0x8000) ? (uint16_t)((crc << 1) ^ 0x8005)
+                           : (uint16_t)(crc << 1);
+    }
+  }
+  return crc == (uint16_t)((p[len - 2] << 8) | p[len - 1]);
+}
+
+// The library's FLAC parser with one decision corrected: what to do with the
+// last frame of a stream.
+//
+// A FLAC frame does not state its length; it ends where the next frame's
+// header starts. The last frame has no next header, so at end of stream the
+// library takes all that is left as the frame. But if the two bytes that start
+// a header (0xFF 0xF8 or 0xFF 0xF9) happen to occur inside that last frame, it
+// instead skips everything before them, finds nothing valid after, logs "Not
+// found frame" and drops the frame: the track's final block is never played.
+// Such byte pairs turn up by chance (about one time in eight in 4 KB of
+// compressed music) and in nearly every frame of very quiet audio.
+//
+// So when the library answers "skip" at end of stream, check what it did not:
+// if all that is left is one frame with a correct CRC-16, that is the frame.
+static esp_es_parse_err_t flac_parse_frame(esp_es_parse_raw_t *in,
+                                           esp_es_parse_frame_info_t *info) {
+  esp_es_parse_err_t err = esp_flac_dec_parse_frame(in, info);
+  if (err == ESP_ES_PARSE_ERR_OK && in->eos && !in->bos &&
+      info->frame_size == 0 && info->skipped_size > 0 &&
+      flac_frame_crc_ok(in->buffer, in->len)) {
+    info->frame_size = in->len;
+    info->skipped_size = 0;
+  }
+  return err;
+}
+
 void player_init(void) {
   esp_audio_dec_register_default();        // the codecs themselves
   esp_audio_simple_dec_register_default(); // the container parsers on top
+
+  // Same FLAC decoder, our corrected parser in front of it.
+  esp_audio_simple_dec_reg_info_t flac = {
+      .decoder_ops = ESP_FLAC_DEC_DEFAULT_OPS(),
+      .parser = flac_parse_frame,
+  };
+  if (esp_audio_simple_dec_register(ESP_AUDIO_SIMPLE_DEC_TYPE_FLAC, &flac) !=
+      ESP_AUDIO_ERR_OK) {
+    // Playback still works with the library's parser; some tracks will end
+    // one block early.
+    ESP_LOGE(TAG, "Cannot register the FLAC parser");
+  }
 }
 
 // Read the file in chunks, hand them to the decoder, convert each block it
