@@ -9,7 +9,8 @@
 # Every tone comes from ffmpeg's `sine` source (integer maths, -18 dBFS, no
 # dither), is trimmed to an exact sample count and encoded by the reference
 # `flac` encoder, so a re-run with the same tool versions gives the same bytes.
-# The one noise burst (t10) comes from ffmpeg's `anoisesrc` with a fixed seed.
+# The one noise burst (t10) comes from ffmpeg's `anoisesrc` with fixed seeds.
+# The peak level of every FLAC is checked too: none is above -12 dBFS.
 # The script checks its own output and exits non-zero if anything is off.
 set -euo pipefail
 
@@ -41,17 +42,23 @@ mono()   { echo "sine=f=440:r=$1"; }
 stereo24() { echo "$(stereo "$1"),aformat=sample_fmts=dbl,volume=0.99:precision=double"; }
 # Both channels the same, raised from the source's -18.06 dBFS to -12 dBFS.
 steady() { echo "sine=f=440:r=$1,volume=6.0618dB,pan=stereo|c0=c0|c1=c0"; }
-# 5 s of full-scale white noise, then a tone 50 dB below the others (about
-# -68 dBFS), both the same in the two channels. Noise cannot be compressed, so
-# its frames are as big as 16-bit stereo-as-mono frames get (about 8 KB); the
-# faint tone's frames are about a ninth of that. A decoder that sizes its
-# parsing by the largest frame then finds several whole frames in what it has
-# gathered, and returns some of them without taking any new input: the case
-# the player once mistook for a stall and skipped audio on. The noise has a
-# fixed seed, so it is the same on every run.
+# 5 s of white noise, then 15 s of a very faint tone.
+#
+# These files are played through headphones, so nothing here is near full
+# scale: the noise peaks at 0.095 of full scale (-20.4 dBFS). The tone is
+# 60 dB below the other files' tones (about -78 dBFS), the same in both
+# channels.
+#
+# Noise cannot be compressed, and the two channels are independent (two
+# seeds), so its frames are about 13 KB; the faint tone's are about a
+# twentieth of that. A decoder that sizes its parsing by the largest frame
+# then finds several whole frames in what it has gathered, and returns some of
+# them without taking any new input: the case the player once mistook for a
+# stall and skipped audio on. The seeds are fixed, so the noise is the same on
+# every run.
 loud_quiet() {
-  local same="pan=stereo|c0=c0|c1=c0"
-  echo "anoisesrc=r=$1:color=white:amplitude=1:seed=20260930,aformat=sample_fmts=s16,$same,atrim=end_sample=$(( $1 * 5 ))[loud];sine=f=440:r=$1,volume=-50dB,$same,atrim=end_sample=$(( $1 * 15 ))[quiet];[loud][quiet]concat=n=2:v=0:a=1"
+  local noise="anoisesrc=r=$1:color=white:amplitude=0.095"
+  echo "$noise:seed=20260930[nl];$noise:seed=20261001[nr];[nl][nr]join=inputs=2:channel_layout=stereo,aformat=sample_fmts=s16,atrim=end_sample=$(( $1 * 5 ))[loud];sine=f=440:r=$1,volume=-60dB,pan=stereo|c0=c0|c1=c0,atrim=end_sample=$(( $1 * 15 ))[quiet];[loud][quiet]concat=n=2:v=0:a=1"
 }
 
 # make_flac <out> <graph> <frames> <bits> [extra flac options]
@@ -76,6 +83,21 @@ check_flac() {
   [ "${got% }" = "$want" ] ||
     die "$(basename "$1"): rate/channels/bits/frames are '${got% }', expected '$want'"
   flac --totally-silent --test "$1" || die "$(basename "$1"): fails flac --test"
+}
+
+# check_peak <file> <highest allowed peak, dBFS>
+# The files are listened to on headphones. This catches a change to a filter
+# graph that would make one of them loud by accident.
+check_peak() {
+  local name peak
+  name=$(basename "$1")
+  peak=$(ffmpeg -hide_banner -nostdin -i "$1" \
+           -af astats=measure_perchannel=none:measure_overall=Peak_level \
+           -f null - 2>&1 | sed -n 's/.*Peak level dB: *//p')
+  [ -n "$peak" ] || die "$name: could not measure the peak level"
+  awk -v p="$peak" -v max="$2" 'BEGIN { exit !(p + 0 <= max + 0) }' ||
+    die "$name: peak is $peak dBFS, must not be above $2 dBFS"
+  echo "$name: peak $peak dBFS (limit $2)"
 }
 
 # check_frame_spread <file> <least max frame bytes> <least largest/median>
@@ -138,6 +160,13 @@ check_mp3  "$audio/t05_48k_vbr_mono.mp3"  48000 1
 [ "$(size "$audio/t08_not_audio.flac")" = 4096 ] || die "t08 is not 4096 bytes"
 check_flac "$audio/t10_loud_quiet_44k_16_st.flac" 44100 2 16 882000
 check_frame_spread "$audio/t10_loud_quiet_44k_16_st.flac" 8000 8
+# The tones are -18.06 dBFS as made by `sine` (-18.15 after the 24-bit
+# scaling), t06 is -12.00.
+check_peak "$audio/t01_44k_16_st.flac"            -18
+check_peak "$audio/t02_96k_24_st.flac"            -18
+check_peak "$audio/t03_48k_16_mono.flac"          -18
+check_peak "$audio/t06_tone_30s.flac"             -12
+check_peak "$audio/t10_loud_quiet_44k_16_st.flac" -20
 
 # ---- test/host/fixtures/ ----------------------------------------------------
 # 0.1 s each. No padding block and no seek table: they only cost bytes here.
@@ -170,6 +199,9 @@ check_flac "$fix/f_44k_16_st.flac"    44100 2 16 4410
 check_flac "$fix/f_96k_24_st.flac"    96000 2 24 9600
 check_flac "$fix/f_48k_16_mono.flac"  48000 1 16 4800
 check_flac "$fix/f_with_picture.flac" 44100 2 16 4410
+for f in f_44k_16_st f_96k_24_st f_48k_16_mono f_with_picture f_with_id3; do
+  check_peak "$fix/$f.flac" -18
+done
 pic=$(metaflac --list --block-type=PICTURE "$fix/f_with_picture.flac" |
         sed -n 's/^ *length: //p')
 [ "${pic:-0}" -ge 20480 ] || die "f_with_picture.flac: picture block is ${pic:-missing} bytes, need 20480"
