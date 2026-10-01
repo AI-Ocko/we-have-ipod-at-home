@@ -1,6 +1,5 @@
 #include "translit.h"
 #include "unity.h"
-#include <stdlib.h>
 #include <string.h>
 
 void setUp(void) {}
@@ -110,23 +109,39 @@ static void test_invalid_utf8_stray_continuation(void) {
 }
 
 static void test_invalid_utf8_truncated_at_end(void) {
-  // Exactly-sized heap copies, so AddressSanitizer catches any read past the
-  // terminator.
+  // Exactly-sized local arrays, so AddressSanitizer's stack redzones catch any
+  // read past the terminator. Nothing is allocated from the heap: a failing
+  // assertion that skipped a free() would make LeakSanitizer end the process
+  // before Unity prints its FAIL lines.
   const char two_byte[] = "abc\xC3";
-  char *in = malloc(sizeof(two_byte));
-  memcpy(in, two_byte, sizeof(two_byte));
   char out[32];
-  translit(in, out, sizeof(out));
+  translit(two_byte, out, sizeof(out));
   TEST_ASSERT_EQUAL_STRING("abc?", out);
-  free(in);
 
   const char three_byte[] = "ab\xE4\xBD";
-  in = malloc(sizeof(three_byte));
-  memcpy(in, three_byte, sizeof(three_byte));
-  translit_stats_t s = translit(in, out, sizeof(out));
+  translit_stats_t s = translit(three_byte, out, sizeof(out));
   TEST_ASSERT_EQUAL_STRING("ab??", out);
   TEST_ASSERT_EQUAL_UINT(2, s.unknown);
-  free(in);
+}
+
+static void test_invalid_utf8_overlong_and_out_of_range(void) {
+  char out[32];
+  translit_stats_t s = translit("\xC1\x81", out, sizeof(out)); // overlong 'A'
+  TEST_ASSERT_EQUAL_STRING("??", out);
+  TEST_ASSERT_EQUAL_UINT(2, s.chars);
+  TEST_ASSERT_EQUAL_UINT(2, s.unknown);
+  translit("\xE0\x80\xAF", out, sizeof(out)); // overlong '/'
+  TEST_ASSERT_EQUAL_STRING("???", out);
+  translit("\xED\xA0\x80", out, sizeof(out)); // surrogate U+D800
+  TEST_ASSERT_EQUAL_STRING("???", out);
+  translit("\xF4\x90\x80\x80", out, sizeof(out)); // above U+10FFFF
+  TEST_ASSERT_EQUAL_STRING("????", out);
+  // U+0080 is valid UTF-8 with no LCD equivalent: one character, not two
+  // rejected bytes.
+  s = translit("\xC2\x80", out, sizeof(out));
+  TEST_ASSERT_EQUAL_STRING("?", out);
+  TEST_ASSERT_EQUAL_UINT(1, s.chars);
+  TEST_ASSERT_EQUAL_UINT(1, s.unknown);
 }
 
 static void test_truncation_keeps_terminator(void) {
@@ -210,6 +225,7 @@ int main(void) {
   RUN_TEST(test_unsupported_scripts_become_question_marks);
   RUN_TEST(test_invalid_utf8_stray_continuation);
   RUN_TEST(test_invalid_utf8_truncated_at_end);
+  RUN_TEST(test_invalid_utf8_overlong_and_out_of_range);
   RUN_TEST(test_truncation_keeps_terminator);
   RUN_TEST(test_truncation_inside_multi_letter_replacement);
   RUN_TEST(test_truncation_size_one_and_zero);

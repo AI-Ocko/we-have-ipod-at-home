@@ -44,9 +44,16 @@ _Static_assert(sizeof(LATIN_EXT_A) == 128 + 1,
 
 #define INVALID_CODE_POINT 0xFFFFFFFFu
 
+// Smallest code point that needs each sequence length, indexed by the number
+// of continuation bytes. Anything lower is an overlong encoding, which is
+// invalid: it would let a tag spell an ASCII character in a disguised form.
+static const uint32_t MIN_CODE_POINT[] = {0, 0x80, 0x800, 0x10000};
+
 // Decode one code point and advance *pp past it. A malformed sequence consumes
-// a single byte and yields INVALID_CODE_POINT. Never reads past the string's
-// terminator: a NUL is not a continuation byte, so it ends the sequence.
+// a single byte and yields INVALID_CODE_POINT; that covers overlong encodings,
+// UTF-16 surrogates and values above U+10FFFF as well as bad bytes. Never
+// reads past the string's terminator: a NUL is not a continuation byte, so it
+// ends the sequence.
 static uint32_t next_code_point(const unsigned char **pp) {
   const unsigned char *p = *pp;
   uint32_t cp = p[0];
@@ -75,6 +82,11 @@ static uint32_t next_code_point(const unsigned char **pp) {
       return INVALID_CODE_POINT;
     }
     cp = (cp << 6) | (p[i] & 0x3F);
+  }
+  if (cp < MIN_CODE_POINT[extra] || (cp >= 0xD800 && cp <= 0xDFFF) ||
+      cp > 0x10FFFF) {
+    *pp = p + 1;
+    return INVALID_CODE_POINT;
   }
   *pp = p + extra + 1;
   return cp;
