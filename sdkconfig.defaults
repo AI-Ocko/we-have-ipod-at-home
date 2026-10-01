@@ -1,1 +1,25 @@
+# This file was generated using idf.py save-defconfig or menuconfig [D] key. It can be edited manually.
+# Espressif IoT Development Framework (ESP-IDF) 6.0.2 Project Minimal Configuration
+#
+CONFIG_EXAMPLE_SDMMC_BUS_WIDTH_1=y
 CONFIG_FATFS_VFS_FSTAT_BLKSIZE=4096
+CONFIG_SPIRAM=y
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_FATFS_LFN_HEAP=y
+# Keeps the interrupt watchdog at the value the hand-edited sdkconfig had.
+# With PSRAM on, a fresh configuration would pick 800 ms instead.
+CONFIG_ESP_INT_WDT_TIMEOUT_MS=300
+
+# File names on the card are UTF-8. The stock setting (code page 437) mangles
+# anything outside basic ASCII.
+CONFIG_FATFS_API_ENCODING_UTF_8=y
+
+# Performance: optimise for speed, run at full clock speed.
+CONFIG_COMPILER_OPTIMIZATION_PERF=y
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+
+# This board's chip is revision 3.1. Declaring revision 3 as the minimum drops
+# the PSRAM cache workaround needed only by older chips, which slows every
+# PSRAM access and uses about 15KB of IRAM.
+CONFIG_ESP32_REV_MIN_3=y

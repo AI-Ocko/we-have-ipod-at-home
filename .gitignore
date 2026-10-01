@@ -6,3 +6,9 @@ managed_components/
 # Local config backups
 sdkconfig.old
 sdkconfig.bak-*
+
+# Generated from sdkconfig.defaults
+sdkconfig
+
+# Host test build output
+test/host/build/
