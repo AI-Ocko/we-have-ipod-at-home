@@ -3,12 +3,13 @@
 #
 # Usage: tools/make_test_audio.sh
 #
-#   test-audio/          t01..t09, for the SD card's /test/ folder (not committed)
+#   test-audio/          t01..t10, for the SD card's /test/ folder (not committed)
 #   test/host/fixtures/  tiny files for the host unit tests (committed)
 #
 # Every tone comes from ffmpeg's `sine` source (integer maths, -18 dBFS, no
 # dither), is trimmed to an exact sample count and encoded by the reference
 # `flac` encoder, so a re-run with the same tool versions gives the same bytes.
+# The one noise burst (t10) comes from ffmpeg's `anoisesrc` with a fixed seed.
 # The script checks its own output and exits non-zero if anything is off.
 set -euo pipefail
 
@@ -40,6 +41,18 @@ mono()   { echo "sine=f=440:r=$1"; }
 stereo24() { echo "$(stereo "$1"),aformat=sample_fmts=dbl,volume=0.99:precision=double"; }
 # Both channels the same, raised from the source's -18.06 dBFS to -12 dBFS.
 steady() { echo "sine=f=440:r=$1,volume=6.0618dB,pan=stereo|c0=c0|c1=c0"; }
+# 5 s of full-scale white noise, then a tone 50 dB below the others (about
+# -68 dBFS), both the same in the two channels. Noise cannot be compressed, so
+# its frames are as big as 16-bit stereo-as-mono frames get (about 8 KB); the
+# faint tone's frames are about a ninth of that. A decoder that sizes its
+# parsing by the largest frame then finds several whole frames in what it has
+# gathered, and returns some of them without taking any new input: the case
+# the player once mistook for a stall and skipped audio on. The noise has a
+# fixed seed, so it is the same on every run.
+loud_quiet() {
+  local same="pan=stereo|c0=c0|c1=c0"
+  echo "anoisesrc=r=$1:color=white:amplitude=1:seed=20260930,aformat=sample_fmts=s16,$same,atrim=end_sample=$(( $1 * 5 ))[loud];sine=f=440:r=$1,volume=-50dB,$same,atrim=end_sample=$(( $1 * 15 ))[quiet];[loud][quiet]concat=n=2:v=0:a=1"
+}
 
 # make_flac <out> <graph> <frames> <bits> [extra flac options]
 make_flac() {
@@ -63,6 +76,28 @@ check_flac() {
   [ "${got% }" = "$want" ] ||
     die "$(basename "$1"): rate/channels/bits/frames are '${got% }', expected '$want'"
   flac --totally-silent --test "$1" || die "$(basename "$1"): fails flac --test"
+}
+
+# check_frame_spread <file> <least max frame bytes> <least largest/median>
+# The property t10 exists for: one stream with both big and small frames.
+check_frame_spread() {
+  local name sizes n largest median declared
+  name=$(basename "$1")
+  declared=$(metaflac --show-max-framesize "$1")
+  [ "${declared:-0}" -ge "$2" ] ||
+    die "$name: STREAMINFO says the largest frame is ${declared:-unknown} bytes, need $2"
+  flac --totally-silent --force --analyze -o "$tmp/frames.ana" "$1" ||
+    die "$name: flac --analyze failed"
+  # One line per frame: "frame=N<tab>offset=N<tab>bits=N<tab>...".
+  sizes=$(sed -n 's/^frame=[0-9]*\toffset=[0-9]*\tbits=\([0-9]*\)\t.*/\1/p' \
+            "$tmp/frames.ana" | sort -n)
+  [ -n "$sizes" ] || die "$name: no frames in the flac --analyze output"
+  n=$(wc -l <<<"$sizes")
+  largest=$(( $(tail -n 1 <<<"$sizes") / 8 ))
+  median=$(( $(sed -n "$(( (n + 1) / 2 ))p" <<<"$sizes") / 8 ))
+  [ "$largest" -ge $(( median * $3 )) ] ||
+    die "$name: largest frame $largest bytes is under $3 times the median $median"
+  echo "$name: $n frames, largest $largest bytes, median $median bytes, STREAMINFO max $declared"
 }
 
 # check_mp3 <file> <rate> <channels>
@@ -91,6 +126,7 @@ make_flac "$audio/t06_tone_30s.flac"    "$(steady 44100)"   1323000 16
 text 4096 > "$audio/t08_not_audio.flac"
 head -c $(( $(size "$audio/t01_44k_16_st.flac") * 60 / 100 )) \
   "$audio/t01_44k_16_st.flac" > "$audio/t09_truncated.flac"
+make_flac "$audio/t10_loud_quiet_44k_16_st.flac" "$(loud_quiet 44100)" 882000 16
 
 check_flac "$audio/t01_44k_16_st.flac"   44100 2 16 441000
 check_flac "$audio/t02_96k_24_st.flac"   96000 2 24 960000
@@ -100,6 +136,8 @@ check_mp3  "$audio/t04_44k_cbr192_st.mp3" 44100 2
 check_mp3  "$audio/t05_48k_vbr_mono.mp3"  48000 1
 [ "$(size "$audio/t07_empty.flac")" = 0 ]        || die "t07 is not empty"
 [ "$(size "$audio/t08_not_audio.flac")" = 4096 ] || die "t08 is not 4096 bytes"
+check_flac "$audio/t10_loud_quiet_44k_16_st.flac" 44100 2 16 882000
+check_frame_spread "$audio/t10_loud_quiet_44k_16_st.flac" 8000 8
 
 # ---- test/host/fixtures/ ----------------------------------------------------
 # 0.1 s each. No padding block and no seek table: they only cost bytes here.
