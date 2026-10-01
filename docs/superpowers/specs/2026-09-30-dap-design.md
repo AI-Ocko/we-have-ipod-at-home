@@ -32,6 +32,10 @@ clean audio with no clicks or dropouts while doing so.
 - LCD powered from 5V with I2C lines direct to the ESP32, as in Freenove's own
   tutorial.
 - Non-Latin text cannot be shown on this LCD; it is simplified or replaced.
+- True 24-bit output: all audio is sent to the DAC in 32-bit frames.
+- Backlight timeout defaults to 30 s. The backlight is estimated at about
+  20 mA at 5V, small next to the rest of the player; stage 2's hardware check
+  includes an optional multimeter measurement to confirm.
 - Software extras: resume at power-on, backlight timeout, sleep timer, and
   fast-forward/rewind subject to a feasibility test (section 14, stage 1).
 
@@ -150,20 +154,30 @@ Its commented-out `--christopher` blocks stay as they are.
 
 ### Output format
 
-Everything is converted to **16-bit stereo at the file's own sample rate**
-before it enters the ring buffer:
+Everything is converted to **32-bit stereo frames at the file's own sample
+rate** before it enters the ring buffer. Each sample is left-justified in its
+32-bit word:
 
-- 24-bit sources are reduced to 16-bit.
+- 24-bit sources are shifted left 8 bits, so all 24 bits reach the DAC.
+- 16-bit sources are shifted left 16 bits.
 - Mono sources are duplicated to both channels.
 - Sample rates from 8 kHz to 96 kHz are accepted. Anything else is reported as
   "Can't play".
 
-A single output format keeps volume scaling, fades and buffer sizing simple.
-On this DAC and wiring, the reduction from 24-bit is not audible.
+The PCM5102A accepts 32-bit I2S frames and uses the top 24 bits. A single
+output format keeps volume scaling, fades and buffer sizing simple, delivers
+true 24-bit output, and means software volume no longer discards detail from
+16-bit sources (the attenuated signal uses the spare low bits).
+
+This doubles the I2S bit clock compared with the 16-bit configuration that was
+verified by ear (2.8 MHz instead of 1.4 MHz at 44.1 kHz). Stage 3's hardware
+check compares against that baseline. Fallback if the faster clock is noisy on
+breadboard wiring: 16-bit frames for 16-bit sources, 32-bit frames only for
+24-bit sources.
 
 ### Ring buffer
 
-384 KB in PSRAM between decoder and output: about 2.2 seconds at 44.1 kHz,
+768 KB in PSRAM between decoder and output: about 2.2 seconds at 44.1 kHz,
 1.0 second at 96 kHz. It absorbs SD card stalls, including playlist and
 resume-state writes during playback.
 
@@ -174,15 +188,18 @@ data, because the decoder keeps pointers into that buffer.
 
 ### I2S
 
-Philips format, no MCLK, `dma_desc_num = 8`, `dma_frame_num = 1000` (the
-values that cured the clicking). When a track's sample rate differs from the
+Philips format, 32-bit data in 32-bit slots, no MCLK. DMA: `dma_desc_num = 16`,
+`dma_frame_num = 500`. A DMA descriptor holds at most 4092 bytes and a 32-bit
+stereo frame is 8 bytes, so 500 frames is near the ceiling; 16 descriptors
+keep the same ~180 ms of DMA depth at 44.1 kHz that cured the clicking in the
+16-bit configuration (8 x 1000). When a track's sample rate differs from the
 previous one, the channel is disabled, its clock reconfigured, and re-enabled.
 
 ### Volume
 
 21 levels, 0 to 20. Level 0 is mute, level 20 is full scale, each step is
-2 dB. Applied in the output task by multiplying samples by a table value.
-Default on first boot: 10.
+2 dB. Applied in the output task by multiplying each 32-bit sample by a table
+value using 64-bit intermediate arithmetic. Default on first boot: 10.
 
 ### Starting, pausing, stopping
 
@@ -385,7 +402,7 @@ characters (the controller allows eight).
 - Playlists → "New playlist", then each playlist → entries
 - Settings
   - Rescan library
-  - Backlight: 15 s / 30 s / 60 s / always on
+  - Backlight: 15 s / 30 s / 60 s / always on (default 30 s)
   - Sleep timer: off / 15 / 30 / 60 min
   - Keypad test
   - About: track count, card free space, firmware build date
@@ -507,11 +524,14 @@ Each stage ends with firmware that works and does more than the last.
 2. **LCD and keypad.** Drivers, plus the keypad test screen as the temporary
    main screen. Includes a label-by-label wiring list.
    *Check: text is readable; every one of the 16 keys shows correctly; long
-   press and repeat work.*
+   press and repeat work. Optional: measure backlight current with a
+   multimeter.*
 3. **Player.** Decoder and output tasks, ring buffer, command and event queues,
-   volume, pause/resume with fades, MP3 support, 24-bit and mono conversion.
+   volume, pause/resume with fades, MP3 support, conversion of 16-bit, 24-bit
+   and mono sources to 32-bit stereo frames.
    Temporary key bindings: D play/pause, A/B volume.
-   *Check: a FLAC and an MP3 both play cleanly; pause and volume cause no
+   *Check: a FLAC and an MP3 both play cleanly and sound at least as good as
+   the 16-bit baseline; a 24-bit FLAC plays; pause and volume cause no
    clicks.*
 4. **Tags and library.** `tags`, `translit`, `library`, the scan worker and its
    progress screen.
