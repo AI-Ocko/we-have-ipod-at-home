@@ -29,6 +29,8 @@ target_compile_options(unity PRIVATE -w)
 add_library(dap_core STATIC
   ${CORE_DIR}/translit.c
   ${CORE_DIR}/screen.c
+  ${CORE_DIR}/keys.c
+  ${CORE_DIR}/keytest.c
 )
 target_include_directories(dap_core PUBLIC ${CORE_DIR})
 
@@ -42,3 +44,5 @@ endfunction()
 
 dap_test(test_translit)
 dap_test(test_screen)
+dap_test(test_keys)
+dap_test(test_keytest)
