@@ -1,0 +1,42 @@
+# Builds the hardware-free dap_core sources with the host compiler and runs
+# their Unity tests. Not part of the firmware build.
+cmake_minimum_required(VERSION 3.22)
+project(dap_host_tests C)
+
+set(CMAKE_C_STANDARD 11)
+set(CMAKE_C_STANDARD_REQUIRED ON)
+
+if(DEFINED ENV{IDF_PATH})
+  set(IDF_PATH $ENV{IDF_PATH})
+else()
+  set(IDF_PATH /opt/esp-idf)
+endif()
+set(UNITY_DIR ${IDF_PATH}/components/unity/unity/src)
+if(NOT EXISTS ${UNITY_DIR}/unity.c)
+  message(FATAL_ERROR "Unity not found at ${UNITY_DIR}; set IDF_PATH")
+endif()
+
+set(CORE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../components/dap_core)
+
+# Sanitizers turn out-of-bounds reads and writes into test failures.
+add_compile_options(-Wall -Wextra -Werror -g -fsanitize=address,undefined -fno-omit-frame-pointer)
+add_link_options(-fsanitize=address,undefined)
+
+add_library(unity STATIC ${UNITY_DIR}/unity.c)
+target_include_directories(unity PUBLIC ${UNITY_DIR})
+target_compile_options(unity PRIVATE -w)
+
+add_library(dap_core STATIC
+  ${CORE_DIR}/translit.c
+)
+target_include_directories(dap_core PUBLIC ${CORE_DIR})
+
+enable_testing()
+
+function(dap_test name)
+  add_executable(${name} ${name}.c)
+  target_link_libraries(${name} PRIVATE dap_core unity)
+  add_test(NAME ${name} COMMAND ${name})
+endfunction()
+
+dap_test(test_translit)
