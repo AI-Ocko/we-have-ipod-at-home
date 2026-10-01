@@ -23,6 +23,7 @@
 - `CONFIG_ESP_MAIN_TASK_STACK_SIZE` stays 16384 (the FLAC decoder overflows smaller stacks).
 - `dap_core` contains pure C using only the C standard library. No ESP-IDF or FreeRTOS includes.
 - GPIO numbers appear only in `main/pins.h`.
+- Performance (spec section 3, "Performance rules"): no floating point, division, per-sample function calls, heap allocation or logging inside audio loops; no linear search inside a loop; single-pass, table-driven text handling; no busy-waiting. Prefer the efficient algorithm when two are equally clear.
 - `MINIMAL_BUILD` stays on in the top-level `CMakeLists.txt`; each component lists what it uses in `REQUIRES`/`PRIV_REQUIRES`.
 - `main/sd_card_example_main.c` is moved with `git mv`, byte-for-byte. Do not edit, tidy or delete its commented-out `--christopher` blocks.
 - Match the existing code style: 2-space indent, `static const char *TAG`, `ESP_LOGx` logging, explanatory comments that say *why*.
@@ -173,7 +174,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 **Interfaces:**
 - Consumes: `tools/serial_capture.py` and `docs/superpowers/plans/stage1-baseline.log` from Task 1.
-- Produces: a `sdkconfig.defaults` from which a deleted `sdkconfig` regenerates with PSRAM, the 16384-byte main stack, 4MB flash, long file names and UTF-8 file-name encoding. `sdkconfig` itself is no longer tracked.
+- Produces: a `sdkconfig.defaults` from which a deleted `sdkconfig` regenerates with PSRAM, the 16384-byte main stack, 4MB flash, long file names, UTF-8 file-name encoding, `-O2`, 240 MHz and minimum chip revision 3. `sdkconfig` itself is no longer tracked.
 
 Background: the settings that make audio work (PSRAM, enlarged stack) were set by hand in `sdkconfig`, which is a generated file. `idf.py save-defconfig` writes the minimal set of non-default options to `sdkconfig.defaults`.
 
@@ -227,7 +228,41 @@ Expected: the only differences are the file-name encoding, i.e.
 
 If any other line differs, add the old value (the `<` line) to `sdkconfig.defaults`, then repeat this step until the diff shows only the encoding change.
 
-- [ ] **Step 5: Stop tracking the generated file**
+- [ ] **Step 5: Turn on the performance settings**
+
+The project is still on the example's debug-oriented defaults: `-Og`, 160 MHz, and a PSRAM workaround for old chip revisions that this board (revision 3.1) does not need.
+
+First confirm the chip revision. Run:
+`echo 'source /opt/esp-idf/export.sh && esptool.py -p /dev/ttyUSB0 chip_id' | newgrp uucp`
+Expected: a line like `Chip is ESP32-D0WD-V3 (revision v3.1)` (older tool versions say `Chip type:`). If the revision is below 3.0, STOP and report BLOCKED; do not set the revision option.
+
+Append to `sdkconfig.defaults`:
+
+```
+# Performance: optimise for speed, run at full clock speed.
+CONFIG_COMPILER_OPTIMIZATION_PERF=y
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+
+# This board's chip is revision 3.1. Declaring revision 3 as the minimum drops
+# the PSRAM cache workaround needed only by older chips, which slows every
+# PSRAM access and uses about 15KB of IRAM.
+CONFIG_ESP32_REV_MIN_3=y
+```
+
+Regenerate and check each setting took effect:
+
+```bash
+cp sdkconfig sdkconfig.bak-pre-perf
+rm sdkconfig
+idf.py reconfigure
+grep -E "^CONFIG_COMPILER_OPTIMIZATION_PERF=y|^CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ=240|^CONFIG_ESP32_REV_MIN_FULL=300|^CONFIG_SPIRAM=y|^CONFIG_SPIRAM_USE_MALLOC=y|^CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384" sdkconfig
+grep -c "^CONFIG_SPIRAM_CACHE_WORKAROUND=y" sdkconfig
+diff <(grep -E '^CONFIG_' sdkconfig.bak-pre-perf | sort) <(grep -E '^CONFIG_' sdkconfig | sort) | grep -E '^[<>]' | grep -vE "COMPILER_OPTIMIZATION|CPU_FREQ|REV_MIN|SPIRAM_CACHE_|SPIRAM_WORKAROUND"
+```
+
+Expected: the first `grep` prints all six lines; the count is `0`; the final command prints nothing. If the final command prints any line, copy it into your report under "unexpected config changes" and continue: the coordinator rules on it.
+
+- [ ] **Step 6: Stop tracking the generated file**
 
 Append to `.gitignore`:
 
@@ -242,7 +277,7 @@ test/host/build/
 Run: `git rm --cached sdkconfig`
 Expected: `rm 'sdkconfig'`. The file stays on disk.
 
-- [ ] **Step 6: Build, flash, and verify behaviour is unchanged**
+- [ ] **Step 7: Build, flash, and verify behaviour is unchanged**
 
 ```bash
 source /opt/esp-idf/export.sh && idf.py build
@@ -252,9 +287,13 @@ diff <(grep -oE "(FLAC: .*|Finished: .*)" docs/superpowers/plans/stage1-baseline
 ```
 
 (Run the capture in the background and wait; it lasts one full track.)
-Expected: `capture exit: 0` and `SAME`. Also run `grep -c "Decode failed" /tmp/stage1-task2.log` and expect `0`.
+Expected: `capture exit: 0` and `SAME`. Also run `grep -cE "Decode failed|Guru Meditation|abort\(\)|Backtrace|rev.* is not supported" /tmp/stage1-task2.log` and expect `0`.
 
-- [ ] **Step 7: Commit**
+Run `grep -iE "cpu freq|chip rev|SPI RAM|spiram" /tmp/stage1-task2.log | head` and include the output in your report.
+
+The first build after changing the optimisation level recompiles everything and takes several minutes.
+
+- [ ] **Step 8: Commit**
 
 ```bash
 git add sdkconfig.defaults .gitignore
@@ -263,6 +302,9 @@ git commit -m "Make build settings reproducible from sdkconfig.defaults
 PSRAM, the 16K main stack and 4MB flash were only in the generated
 sdkconfig. Capture them in sdkconfig.defaults, switch FAT file names to
 UTF-8, and stop tracking sdkconfig.
+
+Also turn on the performance settings: -O2, 240 MHz, and minimum chip
+revision 3, which drops the PSRAM cache workaround.
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```

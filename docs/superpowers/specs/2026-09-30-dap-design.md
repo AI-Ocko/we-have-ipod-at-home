@@ -150,6 +150,50 @@ without the board.
 The original `sd_card_example_main.c` is moved to `reference/`, not deleted.
 Its commented-out `--christopher` blocks stay as they are.
 
+### Performance rules
+
+The code is C on a small machine and is written to get the most out of it.
+These rules bind every module and are checked in review.
+
+**Audio path (runs for every sample):**
+- Integer and fixed-point arithmetic only. No floating point, no division and
+  no function call per sample; work on whole blocks in tight loops.
+- No heap allocation, logging or locking in the steady-state decode and output
+  loops. Buffers are allocated once per track or once at start-up.
+- Data moves between decoder and output in large blocks through the ring
+  buffer, never a sample at a time.
+
+**Library and menus (must stay instant with 5,000 tracks):**
+- Nothing the user does at the keypad may trigger a scan over all tracks.
+  Lists are served from arrays sorted once at scan time; "tracks of this
+  album" and "albums of this artist" are contiguous ranges found by index,
+  not by filtering.
+- Lookups by name or path use binary search over a sorted array or a hash
+  table: O(log n) or O(1), never a linear search inside a loop.
+- Building the index is O(n log n): artist and album names are de-duplicated
+  through a hash table while scanning, then sorted once with `qsort`.
+- Strings are stored once in a single pool and referred to by offset. No
+  per-track `malloc`.
+- Shuffle is a Fisher-Yates shuffle: O(n), unbiased.
+
+**Storage:**
+- Tag reading touches only header bytes and seeks past embedded pictures.
+- The index and playlists are read and written in large buffered blocks, not
+  byte by byte.
+
+**Screen and keys:**
+- The LCD driver keeps a copy of what is on screen and sends only the
+  characters that changed. The I2C link to the LCD is the slowest thing in the
+  system (about 1 ms per character), so redrawing unchanged text is the main
+  thing to avoid.
+- Tasks block on queues or timers. No busy-wait loops and no polling faster
+  than the 10 ms key scan.
+
+**Measured, not assumed:** the real limits on this hardware are the 1-bit SD
+link (about 2.5 MB/s at best) and the LCD's I2C link, not the processor. Where
+a rule above costs clarity for no measurable gain, clarity wins; where there
+is doubt, measure on the board.
+
 ## 4. Audio path
 
 ### Output format
@@ -482,6 +526,22 @@ into `sdkconfig.defaults` so a clean build reproduces them:
 - `CONFIG_FATFS_API_ENCODING_UTF_8=y` (**new**; currently ANSI/OEM code page
   437, which mangles non-ASCII file names).
 - `CONFIG_FATFS_VFS_FSTAT_BLKSIZE=4096` (existing).
+
+Performance settings (**new**; the project was still on the example's
+debug-oriented defaults):
+
+- `CONFIG_COMPILER_OPTIMIZATION_PERF=y`: compile with `-O2` instead of `-Og`.
+- `CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y`: run the processor at its full
+  240 MHz instead of 160 MHz. Costs roughly 20 to 30 mA more current.
+- `CONFIG_ESP32_REV_MIN_3=y`: declare the minimum chip revision as 3. This
+  board's chip is revision 3.1. It removes `CONFIG_SPIRAM_CACHE_WORKAROUND`,
+  a fix for a bug in older chips that slows every access to PSRAM and uses
+  about 15 KB of fast memory. Firmware built this way refuses to boot on
+  older chips, with a clear message.
+
+Not changed: SD card speed stays at the default 20 MHz, because the 1 GB test
+card does not support high-speed mode. A modern SDHC card would allow 40 MHz;
+revisit when the card is replaced.
 
 `MINIMAL_BUILD` stays on, so each component's `REQUIRES` lists what it uses
 (`esp_driver_i2s`, `esp_driver_i2c`, `esp_driver_gpio`, `nvs_flash`, `fatfs`,
