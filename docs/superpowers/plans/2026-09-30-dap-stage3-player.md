@@ -34,6 +34,8 @@
 - No compiler warnings from `main/`, `components/dap_hw/` or `components/dap_core/`.
 - Commit messages end with: `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`
 - Work on branch `main`. Tasks run in order; they share one board and one build directory.
+- **The music track** (amended after Task 3): the original test track `Clay Pigeons.flac` was found to be damaged on the card and its source is gone. From Task 5 on, "the music track" means `/sdcard/music/16 - Kanye West - Hey Mama.flac` (44.1 kHz, 16-bit stereo, about 305 s, largest frame 13736 bytes), which is also the first FLAC the firmware finds at start-up. Its exact frame count comes from its own header. A full real-time play takes over five minutes: run such captures in the background.
+- The card's `/test/` folder also has `t10_loud_quiet_44k_16_st.flac` (882000 frames): about 5 s of noise at -20 dBFS, then 15 s of a very quiet tone. Its small frames after large ones exercise the decode-loop fix from Task 3; include it wherever a task plays the FLAC test files, expecting `frames=882000`.
 - Agents cannot hear the output, see the LCD or press keys. Anything only a person can judge goes in the hardware check at the end; do not claim it.
 
 ### Binding log formats
@@ -330,7 +332,7 @@ Requirements:
 - The blocking player converts each decoded block with `pcm_to_s32_stereo` into a PSRAM buffer allocated once per track and writes that. No per-block allocation.
 - `ENDED frames= expected=` must still be exact.
 
-Board checks: `Clay Pigeons.flac`, `t01`, `t02` (24-bit, 96 kHz), `t03` (mono, 48 kHz) each end with frames equal to expected; no errors; wall-clock duration of each within 1% of its length. Selecting which file plays is up to you for this task (a temporary constant is fine, do not commit it); the committed firmware still plays the first FLAC it finds.
+Board checks: the music track, `t01`, `t02` (24-bit, 96 kHz), `t03` (mono, 48 kHz) each end with frames equal to expected; no errors; wall-clock duration of each within 1% of its length. Selecting which file plays is up to you for this task (a temporary constant is fine, do not commit it); the committed firmware still plays the first FLAC it finds.
 
 Sound quality on 32-bit frames can only be judged by ear; it is in the user's hardware check. Do not claim it.
 
@@ -413,7 +415,7 @@ Required behaviour:
 
 **Temporary screen and keys** (replaced in stage 5): at start-up the first FLAC found plays, as now. Top row: the file's name without folder or extension, through `translit`, cut to 16 characters. Bottom row: `>` while playing or `=` while paused, elapsed and total time as `m:ss/m:ss`, and `V` plus the volume level right-aligned (for example `> 0:12/4:15  V10`). Keys: `D` toggles pause; `A` and `B` raise and lower the volume by one level, on press and on repeat. The UI task owns the LCD and reacts to both key events and player events; it must wait on both without polling (a queue set, or one queue carrying both kinds of message).
 
-**Performance evidence required in your report** (from `stat` and the log, on the real board): buffer fill while playing `Clay Pigeons.flac` for 60 s (typical and lowest); the decoder task's and output task's stack high-water marks after a full track; confirmation by reading your own diff that the two loops contain no allocation, logging, division per sample or floating point.
+**Performance evidence required in your report** (from `stat` and the log, on the real board): buffer fill while playing the music track for 60 s (typical and lowest); the decoder task's and output task's stack high-water marks after a full track; confirmation by reading your own diff that the two loops contain no allocation, logging, division per sample or floating point.
 
 Board checks, all driven by `tools/serial_script.py` and judged from the log:
 1. `play /sdcard/test/t01_44k_16_st.flac`: `STARTED ... rate=44100 bits=16 ch=2 duration_ms=10000`, at least 18 `POSITION` lines with strictly increasing `ms`, `ENDED frames=441000 expected=441000`.
@@ -421,8 +423,8 @@ Board checks, all driven by `tools/serial_script.py` and judged from the log:
 3. Pause: play `t06`, at about 5 s `pause`, wait 4 s (no `POSITION` lines in that time), `resume`, play to the end: `ENDED frames=1323000 expected=1323000`.
 4. Every command in every state (Review Focus 3): script each of `pause`, `resume`, `stop`, `vol 0`, `vol 20`, `vol 99`, `vol -3`, `seek 1000`, and a second `play`, sent while idle, while playing and while paused. No crash, no hang, and a final `play t01` still ends with the exact frame count.
 5. Bad files (Review Focus 4): `play /sdcard/test/nope.flac` gives `ERROR reason=not_found`; `t07_empty.flac` and `t08_not_audio.flac` give one `ERROR` each; `t09_truncated.flac` gives `ENDED` or one `ERROR` after playing part of the file; `play /sdcard/test/t04_44k_cbr192_st.mp3` gives `ERROR reason=unsupported`. After each, `play t01` works.
-6. Keys during playback (Review Focus 8): while `Clay Pigeons.flac` plays, send 200 `key 5` commands over 30 s, then let the track finish: `ENDED frames=X expected=X` and no underrun warning.
-7. Full track: `Clay Pigeons.flac` from start to end with nothing else happening: exact frame count, no `AUD_Dec_Parse` errors, no underrun warnings.
+6. Keys during playback (Review Focus 8): while the music track plays, send 200 `key 5` commands over 30 s, then let the track finish: `ENDED frames=X expected=X` and no underrun warning.
+7. Full track: the music track from start to end with nothing else happening: exact frame count, no `AUD_Dec_Parse` errors, no underrun warnings.
 
 - [ ] **Step 1:** Write `player.h` as above and design notes at the top of `player.c` (states, ownership, message flow). Build.
 - [ ] **Step 2:** Implement the player tasks. Implement the debug console. Rework `app_main.c`.
@@ -467,7 +469,7 @@ Method (spec section 4, "Seeking"; FLAC result measured in stage 1):
 - **FLAC:** `esp_audio_simple_dec_reset()`, feed the file's bytes `[0, audio_start)` again so the parser has the stream parameters, then continue from the target offset. (Method B; methods without the header replay fail with `ESP_AUDIO_ERR_NOT_SUPPORT`.)
 - **MP3:** `esp_audio_simple_dec_reset()` then continue from the target offset; verify on the board that this works and say so in your report. If it does not, report DONE_WITH_CONCERNS with the evidence and leave MP3 seeking disabled.
 - Seeking fades out, discards buffered audio, repositions, and fades in. Position reporting continues from the target. A target before the start clamps to 0; a target at or past the end finishes the track (`ENDED`). Seeking while paused repositions and stays paused. Seeking while idle is ignored. Where the duration is unknown (0), seeking is ignored.
-- Header replay must not re-read a large picture block from the card on every seek if that can be avoided; measure the time from the `seek` command to the next `POSITION` line for `Clay Pigeons.flac` and for a file with a large embedded picture if one is available, and report it.
+- Header replay must not re-read a large picture block from the card on every seek if that can be avoided; measure the time from the `seek` command to the next `POSITION` line for the music track and for a file with a large embedded picture if one is available, and report it.
 
 Board checks:
 1. `play t06` (30 s), at about 3 s `seek 10000`: the next `POSITION` is within 500 ms of 13000 plus the time elapsed; the track ends with `ENDED` and total frames played is between 60% and 72% of 1323000.
@@ -475,7 +477,7 @@ Board checks:
 3. `play /sdcard/test/t06_tone_30s.flac 20000`: first `POSITION` near 20500; frames played about one third of the file.
 4. `pause`, `seek 5000`, wait 2 s (no `POSITION`), `resume`: position continues from the new place.
 5. MP3: the same as check 1 on `t04` with `seek 4000`.
-6. Twenty seeks in a row, 300 ms apart, alternating `+2000` and `-1000`, on `Clay Pigeons.flac`: no crash, no decoder error, playback continues, and the track still reaches `ENDED`.
+6. Twenty seeks in a row, 300 ms apart, alternating `+2000` and `-1000`, on the music track: no crash, no decoder error, playback continues, and the track still reaches `ENDED`.
 
 - [ ] **Step 1:** Implement; build.
 - [ ] **Step 2:** Run the board checks; record the lines and the seek latency.
@@ -508,7 +510,7 @@ Board check: the agent cannot remove the card. Verify what can be verified: a no
 
 On the phone charger unless noted.
 
-1. **No more skip.** Play "Clay Pigeons" from the start. The jump around 0:04 is gone.
+1. **No more skip.** Play the music track from the start. The jump around 0:04 is gone.
 2. **Sound quality.** It sounds at least as clean as before stage 3. (Audio now goes to the DAC as 32-bit frames; if there is new hiss, buzz or distortion, say so: the fallback is 16-bit frames for 16-bit files.)
 3. **Pause and resume** with `D`, several times, on music and on the steady test tone: no click, pop or buzz, and it resumes where it stopped.
 4. **Volume** with `A` and `B`, tapped and held: steps are even, no clicks or zipper noise, level 0 is silent, the number on the LCD follows.
