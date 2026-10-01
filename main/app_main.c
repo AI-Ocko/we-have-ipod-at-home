@@ -1,7 +1,10 @@
 #include "audio_out.h"
 #include "esp_log.h"
+#include "keytest.h"
+#include "lcd.h"
 #include "pins.h"
 #include "player.h"
+#include "screen.h"
 #include "storage.h"
 #include <dirent.h>
 #include <stdbool.h>
@@ -10,6 +13,21 @@
 #include <strings.h>
 
 static const char *TAG = "dap";
+
+// Bring up the LCD and show the first screen. The LCD is not required for
+// audio, so a failure here is logged and the player carries on.
+static void start_display(void) {
+  esp_err_t err = lcd_init(PIN_LCD_SDA, PIN_LCD_SCL);
+  if (err != ESP_OK) {
+    ESP_LOGW(TAG, "Running without an LCD (%s)", esp_err_to_name(err));
+    return;
+  }
+  lcd_define_char(KEYTEST_GLYPH_CODE - 8, KEYTEST_GLYPH);
+
+  screen_t screen;
+  keytest_render(&screen, NULL, 0);
+  lcd_show(&screen);
+}
 
 // Find the first .flac in one directory.
 static bool find_flac_in(const char *dir_path, char *out, size_t out_len) {
@@ -38,6 +56,9 @@ static bool find_flac(char *out, size_t out_len) {
 }
 
 void app_main(void) {
+  // Screen first: it works with or without a card.
+  start_display();
+
   if (storage_mount() != ESP_OK) {
     ESP_LOGE(TAG, "No usable SD card; nothing to play");
     return;
