@@ -376,7 +376,7 @@ Required behaviour:
 Board checks (script key presses with `key`/`long`/`hold`, read screens with `screen`):
 1. Boot shows `Main         1/5` and `>Now Playing` (or your exact rendering: quote it). Nothing is playing (`stat` says idle).
 2. Walk: `8` to Artists, `6`: `Artists     1/17`, `>Artist 00`. `hold 8 5` moves five down. Press `3` repeatedly and quote each stop: the groups `A`, `B`, `D`, `K`, `Q`, `R`, `U`, `V` for this card's artists. `1` goes back a group.
-3. Enter `Radiohead`: `All songs`, `Kid A`, `OK Computer`. Enter `Kid A`: three tracks in the order 1, 2, 10 (quote their titles; the first is 31 characters and must scroll: sample `screen` to show it). `4` twice returns to Artists with the cursor still on `Radiohead`.
+3. Enter `Radiohead`: `All songs`, `Kid A`, `OK Computer`. Enter `Kid A`: three tracks in the order 1, 2, 10 (quote their titles; the first is 29 characters and must scroll: sample `screen` to show it). `4` twice returns to Artists with the cursor still on `Radiohead`.
 4. `Albums`: 108 items; `Greatest Hits` appears twice. `Songs`: 1,028 items; `hold 8 500` ends on item 501 (Review Focus 6: the position must be exact), and the time from the command to the final screen is reported.
 5. Wrap: at the first item `2` goes to the last; a held `2` from item 3 stops at the first.
 6. Select `/lib/` `Kid A` track 2 through the menus: `STARTED path=/sdcard/lib/Radiohead/Kid A/02 Kid A.flac` and `ENDED frames=4410 expected=4410`.
