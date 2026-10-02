@@ -17,9 +17,8 @@
 //
 // - Every state_task_save_* call returns without waiting for anything: it
 //   copies what it is given, wakes the task, and never touches flash or the
-//   card. The caller's
-//   own copy may change the moment the call returns. The most a call costs
-//   is given with each.
+//   card. The caller's own copy may change the moment the call returns. The
+//   most a call costs is given with each.
 // - Call a save whenever the thing may have changed; calling with what was
 //   handed over last costs a comparison and nothing else (nothing is written,
 //   the task is not woken). So the caller need not work out what changed.
@@ -43,14 +42,27 @@
 //      format), and the restored queue has the file's.
 //   2. The position: state_task_loaded_position gives the queue position,
 //      the track number that was at that position, and the time into it.
-//      They are used only if the restored queue's play[position] is that
-//      track number. If it is not (flash and the file are from different
-//      moments), the file's own position stands and the track starts from
-//      its beginning.
+//      If position < the restored queue's count and play[position] is that
+//      track number, play_queue_set_position(position).
 //   3. Shuffle and loop: flash is the authority. play_queue_set_loop and
 //      play_queue_set_shuffle with the values from
 //      state_task_loaded_settings, after 2 (changing shuffle moves the
 //      position).
+//   4. The time: if 2 placed the track, the saved time is used. If it did
+//      not, the queue is looked at again now that 3 is done (flash can be
+//      one shuffle change ahead of the file): if the queue's position is
+//      the saved position and its current track the saved track, the saved
+//      time is used.
+//   5. If neither placed the saved track (flash and the file are from
+//      different moments), it is looked for in the play order as 3 left it,
+//      once: if a position was saved, the track number is not the 65535 of
+//      a position no queue has (the UI saves that one when the queue is
+//      emptied) and is below the index's track count, its first place is
+//      made current with play_queue_set_position and the saved time is
+//      used. The file's position is only as recent as the last change to
+//      what the queue holds, which is why it is the last resort: only if
+//      the queue does not have the track does it stand, and the track there
+//      starts from its beginning.
 //
 // The volume is only in flash.
 
@@ -141,7 +153,8 @@ bool state_task_restore_queue(play_queue_t *q, const library_t *lib);
 // changed: its tracks, their order, shuffle, or the index. A move to another
 // position alone needs no call (it costs a pass over the queue for nothing):
 // the position is saved in flash, by state_task_save_position, and the
-// position in the file is only what stands when flash's does not fit.
+// position in the file is only what stands when the queue does not have
+// flash's track (see WHO IS BELIEVED).
 //
 // The call compares `q` with what was handed over last and copies it only
 // if the two orders, the count, shuffle or the index differ; only then is

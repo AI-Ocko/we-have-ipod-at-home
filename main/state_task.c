@@ -62,11 +62,14 @@
 // about once an hour of playing, each of the six pages in its turn. That
 // erase is the one slow flash operation there is (see WHAT THE AUDIO HEARS).
 //
-// If flash cannot be opened at start-up it is erased and opened again, which
-// covers a format this firmware does not know and an area with no free page
-// left (an area that is blank, or full of rubbish, NVS opens by itself);
-// that is logged once and the defaults are used. If it still cannot be
-// opened, the player runs with the defaults and saves no settings. A write
+// If flash cannot be opened at start-up because its format is one this
+// firmware does not know or it has no free page left
+// (ESP_ERR_NVS_NEW_VERSION_FOUND, ESP_ERR_NVS_NO_FREE_PAGES), it is erased
+// and opened again; that is logged once and the defaults are used. (An area
+// that is blank, or full of rubbish, NVS opens by itself.) Any other error
+// (no memory, say) may be passing, so nothing is erased: the error is logged
+// once and the player runs with the defaults and saves no settings, as it
+// does if flash still cannot be opened after an erase. A write
 // that fails is logged and forgotten: the value is tried again when it next
 // changes.
 //
@@ -116,7 +119,9 @@
 // at most 31 KB (measured; `stat`'s heap_int also counts 74 KB that can
 // only hold code). The first design had one copy internal; the I2S driver
 // then could not allocate its buffers and nothing played. The card does
-// not mind: the file goes out through stdio's buffer, which is internal.
+// not mind: FatFs's own sector buffer is in PSRAM as well, and the SD
+// driver copies such data through a DMA buffer of its own. See MEMORY
+// DURING A SAVE for the little internal RAM a save does take.
 //
 // How "unchanged" is told: by comparing, in the UI's call, the count,
 // shuffle, the index checksum and the bytes of both orders with the latest
@@ -124,8 +129,9 @@
 // pass over the queue that copying it would, and it is right because the
 // latest copy is what the file holds or is about to: the task writes the
 // latest copy and nothing else, a queue restored at power-on is put there
-// too, and if a write fails the latest copy is marked unknown, so that the
-// next hand-over counts as a change. A change that is only the position or
+// too, and if a write fails the latest copy stays the queue the file is
+// about to hold: it is written again (A FAILED SAVE) unless a newer
+// hand-over replaces it first. A change that is only the position or
 // loop is noted in the latest copy (the next file written carries it) but
 // writes nothing.
 //
@@ -177,10 +183,51 @@
 // Flash and the card are written at different moments, so a power cut can
 // leave a position that belongs to an older or a newer queue than the file.
 // state_task.h (WHO IS BELIEVED) says how the caller puts them together: a
-// saved position is used only if the queue has the saved track there.
+// saved position is used as it is only if the queue has the saved track
+// there; otherwise the saved track is looked for in the queue.
 //
-// If the file cannot be written (no card, card full) that is logged and the
-// queue is tried again when it is next handed over.
+// A FAILED SAVE
+//
+// The file is written only when the queue's contents change, so a write
+// that fails (the card pausing too long, the card full) is not followed by
+// another hand-over that would try again: it must be retried here, or the
+// old file would stand for as long as the queue stays as it is. So when a
+// write fails and no newer queue has been handed over meanwhile, the copy
+// is put back as unsaved and marked as a retry (s_retry). It is written
+// again once its back-off is over: 30 s after the failure, doubled at each
+// failure in a row up to 8 minutes, and back to 30 s after a write that
+// works. The task wakes by itself for that (the back-off is one more time
+// it sleeps until, nothing is polled); a save pass that comes earlier, for
+// a position say, leaves the retry alone. So a card that keeps failing
+// costs one attempt and two log lines per back-off, never a loop.
+//
+// A newer hand-over supersedes the retry: hand_over() clears s_retry, so
+// the new queue is written on its own pass as usual, and the failed copy is
+// never written. If a newer queue was already waiting when the write
+// failed, nothing is put back at all.
+//
+// With no card mounted (it is mounted once, at start-up, and never taken
+// away, so this is only for a card that never came) the write stops at
+// that check and logs it, as before; the task does not set its own timer
+// then, and the copy waits for the first save pass after the back-off.
+//
+// MEMORY DURING A SAVE
+//
+// The stream the file is written through has no stdio buffer (_IONBF).
+// play_queue_save makes three large writes (header, play order, original
+// order), so a buffer would only cut them into 4 KB pieces, and it would be
+// 4 KB of internal RAM (stdio allocates it at the first write, and an
+// allocation that small goes to internal RAM first) taken while a track
+// plays, which is when internal RAM is shortest. Measured, playing the
+// 305 s FLAC with a queue of 1,028 tracks: 39,003 bytes of internal data
+// RAM free, largest piece 30,720, before the save; during it, with the
+// buffer, 34,735 and 26,624; without, 38,819 and 30,720 (FatFs's FIL is in
+// PSRAM; the low-water mark fell by 1.7 KB in all, the SD driver's and
+// FatFs's short-lived pieces included). After a switch from an
+// MP3 to that FLAC the largest piece was only 14,336 bytes, so the 4 KB
+// would have been more than a quarter of it. The cost is time: a save of
+// 1,028 tracks took 51 to 73 ms instead of 40 to 53 (eight of each, the
+// FLAC playing), on this task, which the audio does not hear.
 //
 // WHAT THE AUDIO HEARS
 //
@@ -244,6 +291,11 @@
 #define REQUEST_TIDY (1u << 2)   // the files read at start-up are done with
 #define REQUEST_REPORT (1u << 3) // the console's `state`
 #define REQUEST_CLEAR (1u << 4)  // the console's `state clear`
+
+// A queue file that could not be written is tried again after this long,
+// doubled at each failure in a row up to the most. See A FAILED SAVE.
+#define QUEUE_RETRY_FIRST_MS 30000
+#define QUEUE_RETRY_MAX_MS 480000
 
 static const char *TAG = "state";
 
@@ -340,7 +392,8 @@ void state_task_save_position(const state_position_t *position) {
 // Open flash and the namespace. See the design notes for the erase.
 static bool open_flash(void) {
   esp_err_t err = nvs_flash_init();
-  if (err != ESP_OK) {
+  if (err == ESP_ERR_NVS_NO_FREE_PAGES ||
+      err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
     ESP_LOGW(TAG,
              "saved settings cannot be read (%s): erasing them and starting "
              "from the defaults",
@@ -495,6 +548,7 @@ static snapshot_t s_copy[2];
 static int s_latest;       // which copy holds the queue as last handed over
 static bool s_known;       // it does hold one (else: anything differs)
 static bool s_unsaved;     // and the file does not hold it yet
+static bool s_retry;       // because writing it failed (see A FAILED SAVE)
 static int s_claimed = -1; // the copy the task is using, or -1
 static uint8_t *s_found[FOUND_FILES];
 static size_t s_found_bytes[FOUND_FILES];
@@ -525,6 +579,7 @@ static void hand_over(const play_queue_t *q, uint32_t index_checksum) {
   to->loop = q->loop;
   s_copy[s_latest].index = index_checksum;
   s_known = true;
+  s_retry = false; // a new queue: written on its own pass, not a retry's
 }
 
 void state_task_save_queue(const play_queue_t *q, uint32_t index_checksum) {
@@ -711,23 +766,66 @@ static play_queue_t claim(bool latest, uint32_t *index) {
   return s_copy[s_claimed].q;
 }
 
-// The file does not hold what was last handed over after all. Unless a newer
-// queue is waiting to be written anyway, nothing is known about the file
-// now, and the next hand-over counts as a change. With the lock held.
+// Retrying a failed save (see A FAILED SAVE). Only the task uses these.
+static bool s_failing;         // the last write failed
+static bool s_retry_armed;     // the task wakes by itself to retry
+static TickType_t s_failed_at; // when the last write failed
+static TickType_t s_backoff = pdMS_TO_TICKS(QUEUE_RETRY_FIRST_MS);
+
+// The latest copy did not reach the file. Unless a newer queue is waiting to
+// be written anyway (it supersedes this one, and goes on its own pass), the
+// copy is put back as unsaved, to be retried after the back-off. The latest
+// copy still holds the queue the file is about to hold, so the UI's
+// comparisons with it stay right. With the lock held.
 static void file_is_stale(void) {
-  if (!s_unsaved) {
-    s_known = false;
+  if (!s_unsaved && s_known) {
+    s_unsaved = true;
+    s_retry = true;
   }
 }
 
+// After a write that failed: when to try again. Each failure in a row
+// doubles the wait, from QUEUE_RETRY_FIRST_MS up to QUEUE_RETRY_MAX_MS. The
+// task's own timer is set only if the card is mounted; with no card the copy
+// waits for the next save pass after the back-off, which looks for the card
+// before anything else.
+static void back_off(void) {
+  if (s_failing) {
+    s_backoff *= 2;
+    if (s_backoff > pdMS_TO_TICKS(QUEUE_RETRY_MAX_MS)) {
+      s_backoff = pdMS_TO_TICKS(QUEUE_RETRY_MAX_MS);
+    }
+  }
+  s_failing = true;
+  s_failed_at = xTaskGetTickCount();
+  s_retry_armed = storage_is_mounted();
+  ESP_LOGW(TAG, "the queue will be saved again in %" PRIu32 " s",
+           (uint32_t)(pdTICKS_TO_MS(s_backoff) / 1000));
+}
+
+// A write succeeded, or there is nothing left to retry.
+static void back_off_done(void) {
+  s_failing = false;
+  s_retry_armed = false;
+  s_backoff = pdMS_TO_TICKS(QUEUE_RETRY_FIRST_MS);
+}
+
+// Whether a retry is due: the back-off since the last failure is over.
+static bool retry_due(TickType_t now) {
+  return (TickType_t)(now - s_failed_at) >= s_backoff;
+}
+
 // Give the claimed copy back; `stale` if the file was not written from it.
-static void release(bool stale) {
+// True if the copy is now waiting to be retried.
+static bool release(bool stale) {
   xSemaphoreTake(s_queue_lock, portMAX_DELAY);
   s_claimed = -1;
   if (stale) {
     file_is_stale();
   }
+  bool retry = s_retry;
   xSemaphoreGive(s_queue_lock);
+  return retry;
 }
 
 // The files read at start-up are done with: free them and finish on the card
@@ -755,7 +853,11 @@ static void tidy(void) {
     if (!replace_queue_file()) {
       xSemaphoreTake(s_queue_lock, portMAX_DELAY);
       file_is_stale();
+      bool retry = s_retry;
       xSemaphoreGive(s_queue_lock);
+      if (retry) {
+        back_off();
+      }
     }
   } else if (what == TIDY_DISCARD) {
     ESP_LOGW(TAG, "discarding an unfinished queue save");
@@ -780,6 +882,8 @@ static bool write_queue_file(const play_queue_t *q, uint32_t index) {
     ESP_LOGW(TAG, "could not create the queue file (%s)", strerror(errno));
     return false;
   }
+  // No stdio buffer: see MEMORY DURING A SAVE.
+  setvbuf(f, NULL, _IONBF, 0);
   bool saved = play_queue_save(q, index, f);
   // The close writes the file's length and its last data to the card, so
   // it can fail when the write did not.
@@ -792,18 +896,25 @@ static bool write_queue_file(const play_queue_t *q, uint32_t index) {
   return replace_queue_file();
 }
 
-// Write the queue file if a queue was handed over that it does not hold.
-static void save_queue(void) {
+// Write the queue file if a queue was handed over that it does not hold. A
+// copy whose write failed is written again only once its back-off is over.
+static void save_queue(TickType_t now) {
   uint32_t index;
   xSemaphoreTake(s_queue_lock, portMAX_DELAY);
   bool unsaved = s_unsaved;
+  bool waiting = unsaved && s_retry && !retry_due(now);
   play_queue_t q = {0};
-  if (unsaved) {
+  if (unsaved && !waiting) {
     q = claim(true, &index);
     s_unsaved = false;
+    s_retry = false;
   }
   xSemaphoreGive(s_queue_lock);
   if (!unsaved) {
+    back_off_done(); // nothing to retry: a newer queue was written instead
+    return;
+  }
+  if (waiting) {
     return;
   }
 
@@ -813,7 +924,14 @@ static void save_queue(void) {
     ESP_LOGI(TAG, "saved queue: %" PRIu32 " tracks in %" PRIu32 " us", q.count,
              us_since(start));
   }
-  release(!written);
+  bool retry = release(!written);
+  if (written) {
+    back_off_done();
+  } else if (retry) {
+    back_off();
+  }
+  // Else a newer queue came while this one was written: it supersedes this
+  // one and is written on its own pass, like any hand-over.
 }
 
 // --- The task's side: the console ----------------------------------------------
@@ -888,9 +1006,11 @@ static bool clear(void) {
   xSemaphoreTake(s_queue_lock, portMAX_DELAY);
   s_known = false;
   s_unsaved = false;
+  s_retry = false;
   s_found_open = false;
   s_tidy = TIDY_NOTHING;
   xSemaphoreGive(s_queue_lock);
+  back_off_done();
   tidy(); // frees what was read
 
   bool ok = true;
@@ -972,6 +1092,14 @@ static void state_task(void *arg) {
         }
       }
     }
+    if (s_retry_armed) {
+      // A failed queue save is due again at the end of its back-off.
+      TickType_t since = xTaskGetTickCount() - s_failed_at;
+      TickType_t left = (since >= s_backoff) ? 0 : s_backoff - since;
+      if (left < wait) {
+        wait = left;
+      }
+    }
     uint32_t request = 0;
     xTaskNotifyWait(0, UINT32_MAX, &request, wait);
     TickType_t now = xTaskGetTickCount();
@@ -1005,7 +1133,9 @@ static void state_task(void *arg) {
       // on a later pass, if these writes do not already include it.
       unsaved = false;
       save_flash();
-      save_queue();
+      save_queue(now);
+    } else if (s_retry_armed && retry_due(now)) {
+      save_queue(now);
     }
   }
 }

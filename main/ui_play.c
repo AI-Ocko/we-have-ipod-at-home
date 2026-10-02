@@ -146,11 +146,14 @@
 // saved position is looked at once more after that: a power cut between the
 // flash save and the file save of a shuffle change leaves a file in the old
 // order, and only with flash's shuffle applied is the track at the saved
-// place. Either way the saved time is used only for the saved track at the
-// saved place. If the queue then has a current track, it is put on Now
-// Playing as a remembered
-// track at the saved time, and nothing is started: D or 5 plays it from
-// there.
+// place. If neither places the saved track, it is looked for in the final
+// play order and its first place is taken (the file's position is only as
+// recent as the last change to what the queue holds, so it is the last
+// resort). The saved time goes with the saved track wherever it is found;
+// if the queue does not have that track, the file's position stands and its
+// track starts from 0:00. If the queue then has a current track, it is put
+// on Now Playing as a remembered track at that time, and nothing is
+// started: D or 5 plays it from there.
 
 // The player's events are logged here, by the task that reads them, under
 // the player's name: the audio tasks themselves log nothing while they run.
@@ -236,8 +239,8 @@ static void load_track(ui_play_t *play, const library_t *lib, uint32_t track,
 
 // --- saving ------------------------------------------------------------------
 
-// The queue's contents or its position may have changed: hand it to the
-// state task. The one place that does. See WHAT IS SAVED.
+// The queue's contents may have changed: hand it to the state task. The one
+// place that does. See WHAT IS SAVED.
 static void queue_changed(ui_t *ui) {
   if (ui->queue_restored) {
     state_task_save_queue(&ui->queue, ui->queue_index);
@@ -731,8 +734,9 @@ static bool restore(ui_t *ui, const library_t *lib, int64_t now_us) {
   ui->queue_index = library_checksum(lib);
 
   // The saved time belongs to one track at one place in the queue. If the
-  // queue is from another moment than the position, the file's own position
-  // stands and its track starts from the beginning.
+  // queue is from another moment than the position, the saved track is
+  // looked for (below); only if the queue does not have it does the file's
+  // own position stand, and its track start from the beginning.
   uint32_t elapsed_ms = 0;
   state_position_t saved;
   bool has_saved = restored && state_task_loaded_position(&saved);
@@ -747,14 +751,29 @@ static bool restore(ui_t *ui, const library_t *lib, int64_t now_us) {
   bool timed = placed || (has_saved && q->count != 0 &&
                           q->position == saved.position &&
                           play_queue_current(q) == saved.track);
-  if (timed) {
+  // The file's own position is only as recent as the last change to what
+  // the queue holds, so it is the last resort: if the saved track is in the
+  // queue at all, its first place in the play order (now final) is taken.
+  // Once per power-on, one pass over the queue.
+  bool found = false;
+  if (!timed && has_saved && saved.track != UINT16_MAX &&
+      saved.track < library_track_count(lib)) {
+    for (uint32_t i = 0; i < q->count; i++) {
+      if (q->play[i] == saved.track) {
+        found = play_queue_set_position(q, i);
+        break;
+      }
+    }
+  }
+  if (timed || found) {
     elapsed_ms = saved.elapsed_ms;
   }
   ESP_LOGI(TAG,
            "queue %s: %" PRIu32 " tracks, position %" PRIu32 "%s, shuffle %d, "
            "loop %d",
            restored ? "restored" : "not restored", q->count, q->position,
-           timed ? " (as saved)" : "", (int)q->shuffle, (int)q->loop);
+           timed ? " (as saved)" : (found ? " (saved track found)" : ""),
+           (int)q->shuffle, (int)q->loop);
   // From here on the queue is handed over when it changes. This first time
   // it is what the file holds, unless the settings above changed it.
   queue_changed(ui);
