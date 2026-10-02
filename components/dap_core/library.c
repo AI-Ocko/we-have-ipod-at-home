@@ -81,23 +81,33 @@
 //   path order       folder, file name, then track number
 //
 // Two artists (or two albums of one artist) always differ in more than
-// case, so the spelling that happened to be kept never decides an order.
-// For these names the sort key is the position of the name's case-folded
-// class, not of the name itself, so that holds for the album order too.
+// case, so which spelling of a name is kept never decides an order. For
+// these names the sort key is the position of the name's case-folded class,
+// not of the name itself, so that holds for the album order too.
 //
-// Nothing here depends on the order tracks were added in, so the same
-// tracks give the same bytes. One thing does depend on it, because the
-// header asks for it: the spelling kept for an artist or album is the first
-// one seen. Add "ABBA" before "Abba" and the name is "ABBA", the other way
-// round "Abba". That changes those name bytes and nothing else: every
-// number, run and order is the same.
+// Nothing here, and nothing in GROUPING, depends on the order tracks were
+// added in: the same tracks give the same bytes, so a rescan of the same
+// card gives the same file however the card lists its folders.
+//
+// Because text that differs only in case is next to each other in this
+// order, library_find_path can ignore case: folders that differ only in
+// case are neighbouring rows, and so are such file names within a folder.
 //
 // GROUPING
 //
 // An artist is found by its name without leading and trailing spaces and
 // ignoring case; an album by its artist and its name, likewise. The hash
 // and the comparison fold and trim as they go, so no folded copy of any
-// string is ever stored. The name kept is the first spelling, trimmed.
+// string is ever stored.
+//
+// Of the spellings of one name the one kept is the first in the text order
+// above, trimmed: "ABBA" and "Abba" keep "ABBA" whichever came first. A
+// track whose spelling comes before the one kept so far replaces it, there
+// and then, with one comparison against the kept name (which the lookup
+// has just read anyway); there is no pass over the tracks for it. The
+// spelling replaced stays in the log, unused unless something else refers
+// to it, and is not copied to the pool.
+//
 // Titles, track artists and paths are kept exactly as given.
 //
 // BUILDING
@@ -155,7 +165,10 @@
 // The log and the index never overlap, which is why each can be read while
 // the other is written, and why the builder can say exactly when it is
 // full. After every track it works out the finished index's size from its
-// counts (tables T, pool P) and what finishing would need:
+// counts (tables T, pool P) and what finishing would need. (P is counted
+// as strings are first referred to and never goes down, so a replaced
+// spelling leaves it a few bytes too high: an upper bound, which is all the
+// conditions need. The pool's real size is known when it has been written.)
 //
 //     max(low, T) + scratch <= top   and   T + P <= top
 //     scratch = 16 * max(strings + albums, tracks)
@@ -478,6 +491,21 @@ static int text_cmp(const uint8_t *a, size_t an, const uint8_t *b) {
   }
 }
 
+// The same order without its second half: 0 if the two differ in nothing
+// but the case of ASCII letters.
+static int folded_cmp(const uint8_t *a, size_t an, const uint8_t *b) {
+  for (size_t i = 0;; i++) {
+    uint8_t fa = i < an ? fold(a[i]) : 0;
+    uint8_t fb = fold(b[i]);
+    if (fa != fb) {
+      return fa < fb ? -1 : 1;
+    }
+    if (fa == 0) {
+      return 0;
+    }
+  }
+}
+
 // `s` (n bytes, none of them NUL) is the string at `z`: exactly, or ignoring
 // case. Stops at z's NUL.
 static bool same_bytes(const uint8_t *s, size_t n, const uint8_t *z) {
@@ -729,7 +757,7 @@ typedef struct {
   uint32_t n_tracks, n_albums, n_artists;
   uint32_t n_dirs;     // strings used as a folder
   uint32_t n_strings;  // strings in the log
-  uint32_t pool_bytes; // of those the index will hold, with their NULs
+  uint32_t pool_bytes; // of those the index may hold, with their NULs
   uint32_t last_track, last_album, last_artist; // heads of the three lists
 } builder_t;
 
@@ -837,8 +865,8 @@ static bool fits(const builder_t *b) {
 
 // One add: a working copy of the builder, and what to put back in the arena
 // if the track turns out not to fit. A track changes at most six bucket
-// heads and flag bytes of strings, and two bucket heads for its artist and
-// album.
+// heads and flag bytes of strings, and for each of its artist and album
+// either a bucket head (a new one) or the name kept (a better spelling).
 typedef struct {
   uint8_t *base;
   builder_t b;
@@ -928,6 +956,22 @@ static uint32_t intern(add_t *a, const uint8_t *s, size_t n, uint8_t flags) {
   return node;
 }
 
+// The name kept at `field` (of an artist or album node) is the first, in
+// text order, of the spellings seen: `s` takes its place if it comes before
+// it.
+static void prefer_spelling(add_t *a, uint32_t field, const uint8_t *s,
+                            size_t n) {
+  uint8_t *base = a->base;
+  if (text_cmp(s, n, str_text(base, get32(base + field))) >= 0) {
+    return;
+  }
+  uint32_t better = intern(a, s, n, STR_IN_POOL);
+  if (better != 0) {
+    remember32(a, field);
+    put32(base + field, better);
+  }
+}
+
 // `s` without the spaces around it.
 static const uint8_t *trimmed(const char *s, size_t *n) {
   while (*s == ' ') {
@@ -954,6 +998,7 @@ static uint32_t find_or_add_artist(add_t *a, const char *name) {
   for (uint32_t node = head; node != 0;
        node = get32(base + node + ARTIST_NEXT)) {
     if (same_folded(s, n, str_text(base, get32(base + node + ARTIST_NAME)))) {
+      prefer_spelling(a, node + ARTIST_NAME, s, n);
       return node;
     }
   }
@@ -987,6 +1032,7 @@ static uint32_t find_or_add_album(add_t *a, uint32_t artist, const char *name) {
        node = get32(base + node + ALBUM_NEXT)) {
     if (get32(base + node + ALBUM_ARTIST) == artist &&
         same_folded(s, n, str_text(base, get32(base + node + ALBUM_NAME)))) {
+      prefer_spelling(a, node + ALBUM_NAME, s, n);
       return node;
     }
   }
@@ -1349,8 +1395,14 @@ const library_t *library_builder_finish(library_builder_t *builder) {
 #undef PLACE
 
   // The counts kept while adding are what the tables were laid out by; if
-  // they were wrong, so is the index.
-  if (n_dirs != b.n_dirs || used != b.pool_bytes) {
+  // they were wrong, so is the index. The pool may have come out smaller
+  // than was allowed for (see GROUPING); it is the last thing in the index,
+  // so only the total changes.
+  if (n_dirs != b.n_dirs || used > b.pool_bytes) {
+    return NULL;
+  }
+  h.pool_bytes = used;
+  if (!layout(&h)) {
     return NULL;
   }
 
@@ -1763,11 +1815,86 @@ size_t library_track_path(const library_t *lib, uint32_t track, char *out,
   return dir_len + name_len;
 }
 
-// Two binary searches: for the folder among the folder rows (each step
-// reads a row and compares its string), then for the file name among that
-// folder's run of the path order (each step reads an entry, that track's
-// row and its file name). About log2(folders) + log2(files in the folder)
-// steps: 9 + 4 for 5,000 tracks in 500 folders.
+typedef int (*text_cmp_fn)(const uint8_t *a, size_t an, const uint8_t *b);
+
+// The first folder row that is not before the folder `dir` (dir_len bytes)
+// by `cmp`; the number of folders if there is none. A binary search: each
+// step reads a row and compares its string.
+static uint32_t first_dir_not_before(const library_t *lib, const uint8_t *dir,
+                                     size_t dir_len, text_cmp_fn cmp) {
+  const uint8_t *dirs = table(lib, FIELD(lib, off_dirs));
+  uint32_t lo = 0;
+  uint32_t hi = FIELD(lib, n_dirs);
+  while (lo < hi) {
+    uint32_t mid = lo + (hi - lo) / 2;
+    const char *have = pool_text(lib, row32(dirs + mid * sizeof(dir_row_t)));
+    if (cmp(dir, dir_len, (const uint8_t *)have) <= 0) {
+      hi = mid;
+    } else {
+      lo = mid + 1;
+    }
+  }
+  return lo;
+}
+
+static bool dir_is(const library_t *lib, uint32_t dir, const uint8_t *want,
+                   size_t want_len, text_cmp_fn cmp) {
+  const uint8_t *row =
+      table(lib, FIELD(lib, off_dirs)) + dir * sizeof(dir_row_t);
+  return cmp(want, want_len, (const uint8_t *)pool_text(lib, row32(row))) == 0;
+}
+
+// The first track of folder `dir`, in path order, whose file name is `name`
+// by `cmp`. A binary search of the folder's run of the path order: each
+// step reads an entry, that track's row and its file name.
+static bool find_in_dir(const library_t *lib, uint32_t dir, const uint8_t *name,
+                        text_cmp_fn cmp, uint32_t *track) {
+  const uint8_t *paths = table(lib, FIELD(lib, off_paths));
+  const uint8_t *tracks = table(lib, FIELD(lib, off_tracks));
+  uint32_t first, count;
+  run_of(table(lib, FIELD(lib, off_dirs)) + offsetof(dir_row_t, first),
+         sizeof(dir_row_t), dir, FIELD(lib, n_dirs), library_track_count(lib),
+         &first, &count);
+  uint32_t lo = first;
+  uint32_t hi = first + count;
+  uint32_t t = 0;
+  int c = 1; // how `name` compares with the entry at `hi`
+  while (lo < hi) {
+    uint32_t mid = lo + (hi - lo) / 2;
+    uint32_t t_mid = row16(paths + 2 * mid);
+    const char *have =
+        pool_text(lib, row32(tracks + t_mid * sizeof(track_row_t) +
+                             offsetof(track_row_t, name)));
+    int c_mid = cmp(name, TO_NUL, (const uint8_t *)have);
+    if (c_mid <= 0) {
+      hi = mid;
+      t = t_mid;
+      c = c_mid;
+    } else {
+      lo = mid + 1;
+    }
+  }
+  if (c != 0) {
+    return false;
+  }
+  *track = t;
+  return true;
+}
+
+// First the path as written: a binary search for the folder, then one for
+// the file name in that folder's run. About log2(folders) + log2(files in
+// the folder) steps: 9 + 4 for 5,000 tracks in 500 folders. That finds
+// every path spelled as it is on the card, and is where an exact match gets
+// its preference.
+//
+// If there is none, the same two searches ignoring the case of ASCII
+// letters. Text that differs only in case is together in the order
+// everything is sorted by, so the first search lands on the first folder
+// that differs from the one asked for only in case, and the second on the
+// first such file name in it: the first match in path order. On the card
+// (FAT keeps no two names that differ only in case) there is one such
+// folder; on a file system that has several, each is searched in turn until
+// one holds the file.
 bool library_find_path(const library_t *lib, const char *path,
                        uint32_t *track) {
   if (path == NULL || library_track_count(lib) == 0) {
@@ -1777,63 +1904,22 @@ bool library_find_path(const library_t *lib, const char *path,
   while (dir_len > 0 && path[dir_len - 1] != '/') {
     dir_len--;
   }
-  const uint8_t *name = (const uint8_t *)path + dir_len;
-  const uint8_t *dirs = table(lib, FIELD(lib, off_dirs));
+  const uint8_t *dir = (const uint8_t *)path;
+  const uint8_t *name = dir + dir_len;
   uint32_t n_dirs = FIELD(lib, n_dirs);
+  uint32_t found = 0;
 
-  uint32_t lo = 0;
-  uint32_t hi = n_dirs;
-  bool found = false;
-  while (lo < hi && !found) {
-    uint32_t mid = lo + (hi - lo) / 2;
-    int c = text_cmp(
-        (const uint8_t *)path, dir_len,
-        (const uint8_t *)pool_text(lib, row32(dirs + mid * sizeof(dir_row_t))));
-    if (c == 0) {
-      lo = mid;
-      found = true;
-    } else if (c < 0) {
-      hi = mid;
-    } else {
-      lo = mid + 1;
+  uint32_t d = first_dir_not_before(lib, dir, dir_len, text_cmp);
+  bool ok = d < n_dirs && dir_is(lib, d, dir, dir_len, text_cmp) &&
+            find_in_dir(lib, d, name, text_cmp, &found);
+  if (!ok) {
+    for (d = first_dir_not_before(lib, dir, dir_len, folded_cmp);
+         !ok && d < n_dirs && dir_is(lib, d, dir, dir_len, folded_cmp); d++) {
+      ok = find_in_dir(lib, d, name, folded_cmp, &found);
     }
   }
-  if (!found) {
-    return false;
+  if (ok && track != NULL) {
+    *track = found;
   }
-
-  uint32_t first, count;
-  run_of(dirs + offsetof(dir_row_t, first), sizeof(dir_row_t), lo, n_dirs,
-         library_track_count(lib), &first, &count);
-  const uint8_t *paths = table(lib, FIELD(lib, off_paths));
-  const uint8_t *tracks = table(lib, FIELD(lib, off_tracks));
-  // The first entry of the run that is not before `name`: if the same path
-  // was added twice, that is the lower-numbered track.
-  lo = first;
-  hi = first + count;
-  while (lo < hi) {
-    uint32_t mid = lo + (hi - lo) / 2;
-    uint32_t t = row16(paths + 2 * mid);
-    const char *have = pool_text(lib, row32(tracks + t * sizeof(track_row_t) +
-                                            offsetof(track_row_t, name)));
-    if (text_cmp(name, TO_NUL, (const uint8_t *)have) <= 0) {
-      hi = mid;
-    } else {
-      lo = mid + 1;
-    }
-  }
-  if (lo == first + count) {
-    return false;
-  }
-  uint32_t t = row16(paths + 2 * lo);
-  if (text_cmp(name, TO_NUL,
-               (const uint8_t *)pool_text(
-                   lib, row32(tracks + t * sizeof(track_row_t) +
-                              offsetof(track_row_t, name)))) != 0) {
-    return false;
-  }
-  if (track != NULL) {
-    *track = t;
-  }
-  return true;
+  return ok;
 }

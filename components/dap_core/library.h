@@ -16,7 +16,8 @@
 
 typedef enum {
   LIBRARY_OK,
-  LIBRARY_FULL,     // the arena cannot hold any more
+  LIBRARY_FULL,     // the arena cannot hold any more; when loading, it is
+                    // too small for the index in the file
   LIBRARY_BAD_FILE, // not an index: wrong magic, version, size or checksum
   LIBRARY_IO,       // reading or writing failed
 } library_result_t;
@@ -45,6 +46,12 @@ library_builder_t *library_builder_begin(void *arena, size_t arena_bytes);
 
 // Add one track. LIBRARY_FULL means it was not added and nothing more will
 // fit; what was added before is intact and can still be finished.
+//
+// Tracks whose group artists differ only in case or in spaces around the
+// name are one artist; likewise albums within an artist. The name kept is
+// the spelling that sorts first (so "ABBA" rather than "Abba"), without the
+// spaces around it, whatever order the tracks are added in: the same tracks
+// always give the same index.
 library_result_t library_builder_add(library_builder_t *b,
                                      const library_track_in_t *track);
 
@@ -53,7 +60,7 @@ library_result_t library_builder_add(library_builder_t *b,
 const library_t *library_builder_finish(library_builder_t *b);
 
 // Save to an open file, or load one into `arena`. A loaded index is checked
-// before it is trusted.
+// before it is trusted. On anything but LIBRARY_OK `*out` is NULL.
 library_result_t library_save(const library_t *lib, FILE *f);
 library_result_t library_load(void *arena, size_t arena_bytes, FILE *f,
                               const library_t **out);
@@ -62,6 +69,10 @@ uint32_t library_bytes(const library_t *lib); // size of the index
 uint32_t library_track_count(const library_t *lib);
 uint32_t library_artist_count(const library_t *lib);
 uint32_t library_album_count(const library_t *lib);
+
+// A number that is out of range is safe to ask about everywhere below: a
+// name is then "" (never NULL), a range is first 0 and count 0, and a number
+// is UINT32_MAX. A NULL library is an empty one.
 
 // Artists are numbered in A to Z order. An artist's albums are a contiguous
 // range of album numbers, A to Z within the artist; its tracks are a
@@ -80,6 +91,7 @@ void library_album_tracks(const library_t *lib, uint32_t album,
                           uint32_t *first_track, uint32_t *count);
 
 // The n-th album, and the n-th song, in A to Z order over the whole library.
+// UINT32_MAX if `n` is out of range.
 uint32_t library_album_by_name(const library_t *lib, uint32_t n);
 uint32_t library_song_by_title(const library_t *lib, uint32_t n);
 
@@ -94,14 +106,24 @@ typedef struct {
   uint8_t format;
 } library_track_t;
 
-// False if `track` is out of range.
+// False if `track` is out of range; `out` then holds empty strings,
+// UINT32_MAX for the album and artist, and zeros.
 bool library_track(const library_t *lib, uint32_t track, library_track_t *out);
 
 // Write the track's path (as given to the builder) into `out`. Returns the
-// length it needs, like snprintf; 0 if `track` is out of range.
+// length it needs, like snprintf; 0, and an empty string, if `track` is out
+// of range.
 size_t library_track_path(const library_t *lib, uint32_t track, char *out,
                           size_t out_size);
 
 // Find a track by its path. O(log n).
+//
+// The case of ASCII letters is ignored, as the card's file system ignores
+// it: "music/abba/01 sos.flac" finds "Music/ABBA/01 SOS.flac". Bytes above
+// 127 must match as they are. If several tracks match (only possible where
+// the tracks came from a file system that keeps case apart), the one
+// spelled exactly as asked is found; failing that, the first in the order
+// of folder, then file name. `*track` is left alone if nothing is found;
+// `track` may be NULL.
 bool library_find_path(const library_t *lib, const char *path,
                        uint32_t *track);

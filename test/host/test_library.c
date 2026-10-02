@@ -619,6 +619,26 @@ static uint32_t gen_fill(library_builder_t *b, uint32_t limit) {
   return limit;
 }
 
+// Another spelling of the same name: capitals, small letters, or spaces
+// around it.
+static void respell(char *name, size_t cap, uint32_t how) {
+  size_t len = strlen(name);
+  if (how == 1 || how == 2) {
+    for (size_t i = 0; i < len; i++) {
+      char c = name[i];
+      if (how == 1 && c >= 'a' && c <= 'z') {
+        name[i] = (char)(c - 32);
+      } else if (how == 2 && c >= 'A' && c <= 'Z') {
+        name[i] = (char)(c + 32);
+      }
+    }
+  } else if (how == 3 && len + 4 <= cap) {
+    memmove(name + 2, name, len);
+    name[0] = name[1] = name[len + 2] = ' ';
+    name[len + 3] = '\0';
+  }
+}
+
 // --- Small libraries -------------------------------------------------------
 
 void test_empty_library(void) {
@@ -741,38 +761,49 @@ void test_artist_names_differing_in_case_or_spaces_are_one_artist(void) {
   };
   const library_t *lib = build(tracks, 6);
   TEST_ASSERT_EQUAL_UINT32(2, library_artist_count(lib));
-  TEST_ASSERT_EQUAL_STRING("Pink Floyd", library_artist_name(lib, 0));
+  TEST_ASSERT_EQUAL_STRING("PINK FLOYD", library_artist_name(lib, 0));
   TEST_ASSERT_EQUAL_STRING("PinkFloyd", library_artist_name(lib, 1));
-  // "The  Wall" (two spaces), then "The Wall" with four tracks, under Pink
+  // "The  Wall" (two spaces), then "THE WALL" with four tracks, under Pink
   // Floyd; "The Wall" again under PinkFloyd.
   TEST_ASSERT_EQUAL_UINT32(3, library_album_count(lib));
   uint32_t first, count;
   library_artist_albums(lib, 0, &first, &count);
   TEST_ASSERT_EQUAL_UINT32(2, count);
   TEST_ASSERT_EQUAL_STRING("The  Wall", library_album_name(lib, first));
-  TEST_ASSERT_EQUAL_STRING("The Wall", library_album_name(lib, first + 1));
+  TEST_ASSERT_EQUAL_STRING("THE WALL", library_album_name(lib, first + 1));
   library_album_tracks(lib, first + 1, &first, &count);
   TEST_ASSERT_EQUAL_UINT32(4, count);
   assert_well_formed(lib);
 }
 
-void test_first_spelling_seen_is_kept(void) {
+// Of the spellings of one artist (or of one album of one artist) the one
+// kept is the first in text order: so capitals win, and it is the same one
+// whichever track came first.
+void test_kept_spelling_does_not_depend_on_adding_order(void) {
   const library_track_in_t tracks[] = {
-      trk("a/1.flac", "One", "x", "Arrival", "ABBA", 1, 0),
-      trk("a/2.flac", "Two", "x", "ARRIVAL", "Abba", 2, 0),
+      trk("a/1.flac", "One", "x", "Arrival", "Abba", 1, 0),
+      trk("a/2.flac", "Two", "x", "ARRIVAL", "ABBA", 2, 0),
       trk("a/3.flac", "Three", "x", "arrival", "abba", 3, 0),
+      trk("a/4.flac", "Four", "x", " arrivaL ", "  abbA ", 4, 0),
+      trk("r/1.flac", "Five", "x", "the bends", "radiohead", 1, 0),
+      trk("r/2.flac", "Six", "x", "The Bends", "Radiohead", 2, 0),
+      trk("r/3.flac", "Seven", "x", "the Bends", "radiohead", 3, 0),
   };
-  const library_t *lib = build(tracks, 3);
-  TEST_ASSERT_EQUAL_UINT32(1, library_artist_count(lib));
-  TEST_ASSERT_EQUAL_UINT32(1, library_album_count(lib));
-  TEST_ASSERT_EQUAL_STRING("ABBA", library_artist_name(lib, 0));
-  TEST_ASSERT_EQUAL_STRING("Arrival", library_album_name(lib, 0));
-
-  const size_t backwards[] = {2, 1, 0};
-  lib = build_ordered(ARENA_A, ARENA_BYTES, tracks, 3, backwards);
-  TEST_ASSERT_EQUAL_UINT32(1, library_artist_count(lib));
-  TEST_ASSERT_EQUAL_STRING("abba", library_artist_name(lib, 0));
-  TEST_ASSERT_EQUAL_STRING("arrival", library_album_name(lib, 0));
+  const size_t orders[][7] = {
+      {0, 1, 2, 3, 4, 5, 6}, {6, 5, 4, 3, 2, 1, 0}, {1, 0, 3, 2, 5, 4, 6},
+      {2, 3, 0, 1, 6, 4, 5}, {3, 6, 2, 5, 1, 4, 0}, {5, 2, 6, 1, 4, 0, 3},
+  };
+  for (size_t o = 0; o < sizeof(orders) / sizeof(orders[0]); o++) {
+    const library_t *lib =
+        build_ordered(ARENA_A, ARENA_BYTES, tracks, 7, orders[o]);
+    TEST_ASSERT_EQUAL_UINT32(2, library_artist_count(lib));
+    TEST_ASSERT_EQUAL_UINT32(2, library_album_count(lib));
+    TEST_ASSERT_EQUAL_STRING("ABBA", library_artist_name(lib, 0));
+    TEST_ASSERT_EQUAL_STRING("ARRIVAL", library_album_name(lib, 0));
+    TEST_ASSERT_EQUAL_STRING("Radiohead", library_artist_name(lib, 1));
+    TEST_ASSERT_EQUAL_STRING("The Bends", library_album_name(lib, 1));
+    assert_well_formed(lib);
+  }
 }
 
 void test_albums_group_under_their_artist(void) {
@@ -1107,8 +1138,7 @@ void test_find_path_finds_every_track_and_rejects_others(void) {
       "music/16 - Kanye West - Hey Mama.flac ",
       "music/16 - Kanye West - Hey Mama.flacx",
       "/music/16 - Kanye West - Hey Mama.flac",
-      "MUSIC/HEY MAMA.FLAC",
-      "music/Hey mama.flac",
+      "music/Hey Mama.flak",
       "music//Hey Mama.flac",
       "Hey Mama.flac",
       "top level.flac",
@@ -1116,7 +1146,7 @@ void test_find_path_finds_every_track_and_rejects_others(void) {
       "a/b/c",
       "a/",
       "b",
-      "A",
+      "\xC3\xA1",
       "a/b/c/d/e/f/g/h/i/j/k/l/m/n/o/p/deep two.flac",
       "Musik/Bjork/Homogenic/01 Joga.flac",
       "zzz/nothing.flac",
@@ -1129,6 +1159,105 @@ void test_find_path_finds_every_track_and_rejects_others(void) {
   // The caller may not want the number.
   TEST_ASSERT_TRUE(library_find_path(lib, "a/b", NULL));
   TEST_ASSERT_FALSE(library_find_path(lib, NULL, NULL));
+}
+
+// The card's file system ignores the case of ASCII letters, and so does the
+// lookup; where that leaves a choice, the path as written wins, then the
+// first in path order.
+void test_find_path_ignores_ascii_case(void) {
+  const char *const paths[] = {
+      "Music/Abba/Gold/01 Waterloo.flac",       // 0
+      "Musik/Bj\xC3\xB6rk/01 J\xC3\xB3ga.flac", // 1
+      "top.mp3",                                // 2
+      "x/Song.flac",                            // 3
+      "x/song.flac",                            // 4
+      "x/SONG.flac",                            // 5
+      "y/a.flac",                               // 6
+      "Y/a.flac",                               // 7
+      "y/b.flac",                               // 8
+      "Y/c.flac",                               // 9
+  };
+  enum { N = sizeof(paths) / sizeof(paths[0]) };
+  static char titles[N][4];
+  library_track_in_t tracks[N];
+  for (size_t i = 0; i < N; i++) {
+    snprintf(titles[i], sizeof(titles[i]), "T%u", (unsigned)i);
+    tracks[i] = trk(paths[i], titles[i], "A", "B", "A", 0, 0);
+  }
+  const library_t *lib = build(tracks, N);
+  const struct {
+    const char *ask;
+    const char *want; // the title of the track found
+  } found[] = {
+      // Exactly as stored.
+      {"Music/Abba/Gold/01 Waterloo.flac", "T0"},
+      // Other case in the folder part, in the file name, in both.
+      {"music/ABBA/gold/01 Waterloo.flac", "T0"},
+      {"Music/Abba/Gold/01 WATERLOO.FLAC", "T0"},
+      {"MUSIC/abba/GOLD/01 waterloo.Flac", "T0"},
+      {"TOP.MP3", "T2"},
+      {"Top.mp3", "T2"},
+      // Bytes above 127 as they are, the ASCII around them in any case.
+      {"MUSIK/BJ\xC3\xB6RK/01 j\xC3\xB3GA.FLAC", "T1"},
+      // Several differ only in case: the one spelled as asked.
+      {"x/Song.flac", "T3"},
+      {"x/song.flac", "T4"},
+      {"x/SONG.flac", "T5"},
+      {"y/a.flac", "T6"},
+      {"Y/a.flac", "T7"},
+      // None spelled as asked: the first in path order ("SONG" before
+      // "Song" before "song"; folder "Y/" before "y/").
+      {"x/sONG.flac", "T5"},
+      {"X/song.flac", "T5"},
+      {"y/A.flac", "T7"},
+      // The file is in only one of two folders that differ in case.
+      {"Y/b.flac", "T8"},
+      {"Y/B.FLAC", "T8"},
+      {"y/c.flac", "T9"},
+  };
+  for (size_t i = 0; i < sizeof(found) / sizeof(found[0]); i++) {
+    uint32_t t = 999;
+    TEST_ASSERT_TRUE_MESSAGE(library_find_path(lib, found[i].ask, &t),
+                             found[i].ask);
+    TEST_ASSERT_EQUAL_STRING_MESSAGE(found[i].want, track_info(lib, t).title,
+                                     found[i].ask);
+  }
+  const char *const absent[] = {
+      // A different letter is a different letter: O-umlaut for o-umlaut,
+      // a plain o, an accented capital.
+      "Musik/Bj\xC3\x96rk/01 J\xC3\xB3ga.flac",
+      "Musik/Bjork/01 Joga.flac",
+      "Musik/Bj\xC3\xB6rk/01 J\xC3\x93ga.flac",
+      // Case is all that is ignored.
+      "Music/Abba/Gold/01 Waterloo.fla",
+      "Music/Abba/Gold/01  Waterloo.flac",
+      "Music/Abba/Gold/",
+      "Music/Abba/Gold",
+      "music/abba/01 waterloo.flac",
+      "x/song",
+      "y/d.flac",
+      "z/a.flac",
+      "top.mp4",
+  };
+  for (size_t i = 0; i < sizeof(absent) / sizeof(absent[0]); i++) {
+    uint32_t t = 999;
+    TEST_ASSERT_FALSE_MESSAGE(library_find_path(lib, absent[i], &t), absent[i]);
+    TEST_ASSERT_EQUAL_UINT32(999, t);
+  }
+  assert_well_formed(lib);
+
+  // It is so for a loaded index too, and for a large one.
+  library_builder_t *b = library_builder_begin(ARENA_A, ARENA_BYTES);
+  TEST_ASSERT_NOT_NULL(b);
+  TEST_ASSERT_EQUAL_UINT32(700, gen_fill(b, 700));
+  lib = library_builder_finish(b);
+  TEST_ASSERT_NOT_NULL(lib);
+  for (uint32_t i = 0; i < 700; i++) {
+    gen_track(i, &gen);
+    uint32_t want = track_at(lib, gen.path);
+    respell(gen.path, sizeof(gen.path), 1 + i % 2);
+    TEST_ASSERT_EQUAL_UINT32(want, track_at(lib, gen.path));
+  }
 }
 
 // The scan never hands over the same file twice, but if a caller does, both
@@ -1196,15 +1325,23 @@ static library_track_in_t order_tracks[ORDER_TRACKS];
 static gen_track_t order_gen[ORDER_TRACKS];
 static size_t order_of[ORDER_TRACKS];
 
-static void make_order_tracks(void) {
+// The first 600 generated tracks. With `spellings`, about half of them
+// spell their group artist and their album differently from the rest of the
+// album, the way tags typed by hand do.
+static void make_order_tracks(bool spellings) {
   for (uint32_t i = 0; i < ORDER_TRACKS; i++) {
     gen_track(i, &order_gen[i]);
+    if (spellings) {
+      respell(order_gen[i].group, sizeof(order_gen[i].group), mix(i) % 6);
+      respell(order_gen[i].album, sizeof(order_gen[i].album),
+              mix(i + 1000) % 6);
+    }
     order_tracks[i] = order_gen[i].in;
   }
 }
 
 void test_order_of_adding_does_not_change_the_result(void) {
-  make_order_tracks();
+  make_order_tracks(true);
   const library_t *lib =
       build_ordered(ARENA_A, ARENA_BYTES, order_tracks, ORDER_TRACKS, NULL);
   size_t len_a = save_image(lib, img_a, sizeof(img_a));
@@ -1271,10 +1408,9 @@ void test_order_of_adding_does_not_matter_when_tracks_are_nearly_equal(void) {
   }
 }
 
-// "First spelling kept" is the one thing that depends on the order. It
-// changes the name shown and nothing else: every number, range and order is
-// the same.
-void test_order_of_adding_changes_only_the_spelling_kept(void) {
+// Differing spellings of the same artist and album: the same file from
+// either order, names included.
+void test_differing_spellings_give_the_same_file_in_any_order(void) {
   const library_track_in_t tracks[] = {
       trk("q/1.flac", "One", "Queen", "Hits", "Queen", 1, 0),
       trk("q/2.flac", "Two", "Queen", "HITS", "QUEEN", 2, 0),
@@ -1282,39 +1418,36 @@ void test_order_of_adding_changes_only_the_spelling_kept(void) {
       trk("z/1.flac", "Four", "ZZ Top", "Hits", "ZZ Top", 1, 0),
       trk("z/2.flac", "Five", "ZZ Top", "hitS", "zz top", 2, 0),
       trk("q/3.flac", "Six", "Queen", "A Night", "queen", 1, 0),
+      trk("z/3.flac", "Seven", "zz top", " hits ", " Zz Top", 3, 0),
   };
-  const size_t backwards[] = {5, 4, 3, 2, 1, 0};
-  const library_t *a = build_ordered(ARENA_A, ARENA_BYTES, tracks, 6, NULL);
-  const library_t *b =
-      build_ordered(ARENA_B, ARENA_BYTES, tracks, 6, backwards);
-  TEST_ASSERT_EQUAL_STRING("Queen", library_artist_name(a, 1));
-  TEST_ASSERT_EQUAL_STRING("queen", library_artist_name(b, 1));
-  TEST_ASSERT_EQUAL_STRING("ZZ Top", library_artist_name(a, 2));
-  TEST_ASSERT_EQUAL_STRING("zz top", library_artist_name(b, 2));
-  TEST_ASSERT_EQUAL_UINT32(3, library_artist_count(b));
+  const library_t *a = build_ordered(ARENA_A, ARENA_BYTES, tracks, 7, NULL);
+  TEST_ASSERT_EQUAL_UINT32(3, library_artist_count(a));
   TEST_ASSERT_EQUAL_UINT32(4, library_album_count(a));
-  TEST_ASSERT_EQUAL_UINT32(4, library_album_count(b));
-  for (uint32_t i = 0; i < 4; i++) {
-    TEST_ASSERT_EQUAL_INT(
-        0, fold_cmp(library_album_name(a, i), library_album_name(b, i)));
-    TEST_ASSERT_EQUAL_UINT32(library_album_artist(a, i),
-                             library_album_artist(b, i));
-    TEST_ASSERT_EQUAL_UINT32(library_album_by_name(a, i),
-                             library_album_by_name(b, i));
-  }
-  for (uint32_t t = 0; t < 6; t++) {
-    library_track_t ta = track_info(a, t);
-    library_track_t tb = track_info(b, t);
-    TEST_ASSERT_EQUAL_STRING(ta.title, tb.title);
-    TEST_ASSERT_EQUAL_UINT32(ta.album, tb.album);
-    TEST_ASSERT_EQUAL_UINT32(library_song_by_title(a, t),
-                             library_song_by_title(b, t));
-  }
+  TEST_ASSERT_EQUAL_STRING("Abba", library_artist_name(a, 0));
+  TEST_ASSERT_EQUAL_STRING("QUEEN", library_artist_name(a, 1));
+  TEST_ASSERT_EQUAL_STRING("ZZ Top", library_artist_name(a, 2));
+  TEST_ASSERT_EQUAL_STRING("hits", library_album_name(a, 0));
+  TEST_ASSERT_EQUAL_STRING("A Night", library_album_name(a, 1));
+  TEST_ASSERT_EQUAL_STRING("HITS", library_album_name(a, 2));
+  TEST_ASSERT_EQUAL_STRING("Hits", library_album_name(a, 3));
+  // A track's own artist is never respelled.
+  TEST_ASSERT_EQUAL_STRING("zz top",
+                           track_info(a, track_at(a, "z/3.flac")).artist);
   assert_well_formed(a);
-  assert_well_formed(b);
+  size_t len_a = save_image(a, img_a, sizeof(img_a));
+  for (size_t shift = 1; shift < 7; shift++) {
+    size_t order[7];
+    for (size_t i = 0; i < 7; i++) {
+      order[i] = (i * 3 + shift) % 7;
+    }
+    const library_t *b = build_ordered(ARENA_B, ARENA_BYTES, tracks, 7, order);
+    size_t len_b = save_image(b, img_b, sizeof(img_b));
+    TEST_ASSERT_EQUAL_size_t(len_a, len_b);
+    TEST_ASSERT_EQUAL_INT(0, memcmp(img_a, img_b, len_a));
+  }
 }
 
-// The name kept is the first spelling without its surrounding spaces.
+// The name kept has no spaces around it.
 void test_kept_names_are_trimmed(void) {
   const library_track_in_t tracks[] = {
       trk("q/1.flac", " One ", "  Queen ", " Jazz  ", "  Queen ", 1, 0),
@@ -1958,7 +2091,7 @@ void test_begin_refuses_an_arena_too_small_to_start(void) {
 // An arena that starts at an odd address works: the index sits at the next
 // multiple of four inside it.
 void test_the_arena_need_not_be_aligned(void) {
-  make_order_tracks();
+  make_order_tracks(false);
   const library_t *lib =
       build_ordered(ARENA_A, ARENA_BYTES, order_tracks, 200, NULL);
   size_t n = save_image(lib, img_a, sizeof(img_a));
@@ -2046,6 +2179,45 @@ void test_full_arena_keeps_what_was_added(void) {
     }
   }
   TEST_ASSERT_TRUE(sizes_tried > 1000);
+  TEST_ASSERT_TRUE(most > 80);
+}
+
+// The same with tracks that spell their artist and album in different ways,
+// so that the track that does not fit is often one that would have changed
+// the name kept: it must leave the name as it was.
+void test_full_arena_with_differing_spellings_keeps_what_was_added(void) {
+  make_order_tracks(true);
+  uint32_t most = 0;
+  for (size_t bytes = 200; bytes <= SMALL_MAX; bytes += 53) {
+    void *arena = small_words + GUARD_WORDS;
+    guards_set();
+    library_builder_t *b = library_builder_begin(arena, bytes);
+    TEST_ASSERT_NOT_NULL(b);
+    uint32_t added = 0;
+    while (added < ORDER_TRACKS) {
+      library_result_t r = library_builder_add(b, &order_tracks[added]);
+      if (r == LIBRARY_FULL) {
+        break;
+      }
+      TEST_ASSERT_EQUAL(LIBRARY_OK, r);
+      added++;
+    }
+    TEST_ASSERT_TRUE(added < ORDER_TRACKS);
+    const library_t *lib = library_builder_finish(b);
+    TEST_ASSERT_NOT_NULL(lib);
+    assert_guards_intact(bytes);
+    TEST_ASSERT_EQUAL_UINT32(added, library_track_count(lib));
+    TEST_ASSERT_TRUE(library_bytes(lib) <= bytes);
+    assert_well_formed(lib);
+    size_t n = save_image(lib, img_a, sizeof(img_a));
+    const library_t *big =
+        build_ordered(ARENA_B, 8 * SMALL_MAX, order_tracks, added, NULL);
+    TEST_ASSERT_EQUAL_size_t(n, save_image(big, img_b, sizeof(img_b)));
+    TEST_ASSERT_EQUAL_INT(0, memcmp(img_a, img_b, n));
+    if (added > most) {
+      most = added;
+    }
+  }
   TEST_ASSERT_TRUE(most > 80);
 }
 
@@ -2265,7 +2437,7 @@ int main(void) {
   RUN_TEST(test_one_track);
   RUN_TEST(test_artists_are_sorted_ignoring_case);
   RUN_TEST(test_artist_names_differing_in_case_or_spaces_are_one_artist);
-  RUN_TEST(test_first_spelling_seen_is_kept);
+  RUN_TEST(test_kept_spelling_does_not_depend_on_adding_order);
   RUN_TEST(test_albums_group_under_their_artist);
   RUN_TEST(test_same_album_name_under_two_artists_is_two_albums);
   RUN_TEST(test_compilation_is_one_album_under_its_group_artist);
@@ -2277,11 +2449,12 @@ int main(void) {
   RUN_TEST(test_track_path_round_trips);
   RUN_TEST(test_track_path_reports_needed_length_when_the_buffer_is_small);
   RUN_TEST(test_find_path_finds_every_track_and_rejects_others);
+  RUN_TEST(test_find_path_ignores_ascii_case);
   RUN_TEST(test_the_same_path_twice_is_two_tracks);
   RUN_TEST(test_out_of_range_numbers_are_safe);
   RUN_TEST(test_order_of_adding_does_not_change_the_result);
   RUN_TEST(test_order_of_adding_does_not_matter_when_tracks_are_nearly_equal);
-  RUN_TEST(test_order_of_adding_changes_only_the_spelling_kept);
+  RUN_TEST(test_differing_spellings_give_the_same_file_in_any_order);
   RUN_TEST(test_kept_names_are_trimmed);
   RUN_TEST(test_save_and_load_round_trip);
   RUN_TEST(test_checksum_is_the_standard_crc32);
@@ -2299,6 +2472,7 @@ int main(void) {
   RUN_TEST(test_begin_refuses_an_arena_too_small_to_start);
   RUN_TEST(test_the_arena_need_not_be_aligned);
   RUN_TEST(test_full_arena_keeps_what_was_added);
+  RUN_TEST(test_full_arena_with_differing_spellings_keeps_what_was_added);
   RUN_TEST(test_five_thousand_tracks_fit_and_answer);
   RUN_TEST(test_one_thousand_tracks);
   RUN_TEST(test_ten_thousand_tracks_fill_the_arena_cleanly);
