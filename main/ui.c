@@ -13,6 +13,7 @@
 #include "player.h"
 #include "player_status.h"
 #include "screen.h"
+#include "state_task.h"
 #include "ui_state.h"
 #include <inttypes.h>
 #include <stdatomic.h>
@@ -93,7 +94,8 @@
 // global keys and, if it is not one of them, to the screen that is up:
 //
 //   A / B   volume up / down, on press and on repeat; shows the bar for
-//           1.5 s, also when the volume was already at its end
+//           1.5 s, also when the volume was already at its end. A new level
+//           is handed to the state task, which saves it (state_task.h)
 //   D       pause if playing, resume if paused; if nothing is loaded and a
 //           track is remembered (its list ended, or a scan stopped it),
 //           play that track again from its beginning; otherwise nothing
@@ -414,6 +416,9 @@ static void ui_on_key(ui_t *ui, const key_event_t *event, int64_t now_us) {
       int level = status.volume + (event->key == 'A' ? 1 : -1);
       if (level >= 0 && level <= PCM_VOLUME_MAX) {
         player_set_volume(level);
+        // Returns at once; a held key is saved once, when it has settled.
+        ui->settings.volume = level;
+        state_task_save_settings(&ui->settings);
       }
       ui->volume_until_us = now_us + UI_OVERLAY_MS * 1000;
     }
@@ -536,6 +541,7 @@ static void ui_task(void *arg) {
   static ui_t ui; // too big for the stack
   browse_init(&ui.browse);
   ui.list_dirty = true;
+  state_task_loaded_settings(&ui.settings);
   screen_t shown;        // what the LCD was last told to show
   bool shown_ok = false; // and it took it
 

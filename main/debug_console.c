@@ -9,11 +9,13 @@
 #include "libscan.h"
 #include "player.h"
 #include "player_status.h"
+#include "state_task.h"
 #include "ui.h"
 #include <ctype.h>
 #include <errno.h>
 #include <inttypes.h>
 #include <stdbool.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -458,6 +460,59 @@ static const char *cmd_lib(char *args) {
   return why;
 }
 
+// A saved value, or `-` for one that is not saved.
+static const char *saved(bool has, uint32_t value, char *text, size_t size) {
+  if (!has) {
+    return "-";
+  }
+  snprintf(text, size, "%" PRIu32, value);
+  return text;
+}
+
+// `state` and `state clear`: the lines printed are in debug_console.h.
+static const char *cmd_state(char *args) {
+  if (strcmp(args, "clear") == 0) {
+    return state_task_clear() ? NULL : "not everything could be erased";
+  }
+  if (*args != '\0') {
+    return "expected: state | state clear";
+  }
+  state_report_t r;
+  if (!state_task_report(&r)) {
+    return "no state task";
+  }
+  char text[6][12];
+  ESP_LOGI(TAG,
+           "state flash=%s volume=%s shuffle=%s loop=%s position=%s track=%s "
+           "elapsed_ms=%s stack_free=%u",
+           r.flash ? "ok" : "unusable",
+           saved(r.has_volume, r.volume, text[0], sizeof(text[0])),
+           saved(r.has_shuffle, r.shuffle, text[1], sizeof(text[1])),
+           saved(r.has_loop, r.loop, text[2], sizeof(text[2])),
+           saved(r.has_position, r.position.position, text[3], sizeof(text[3])),
+           saved(r.has_position, r.position.track, text[4], sizeof(text[4])),
+           saved(r.has_position, r.position.elapsed_ms, text[5],
+                 sizeof(text[5])),
+           (unsigned)r.stack_free);
+  char index[12] = "-";
+  if (r.index) {
+    snprintf(index, sizeof(index), "%08" PRIx32, r.index_checksum);
+  }
+  if (r.file) {
+    ESP_LOGI(TAG,
+             "state queue_file=present bytes=%" PRIu32 " count=%" PRIu32
+             " index=%08" PRIx32 " loaded_index=%s match=%s usable=%s "
+             "unfinished=%s",
+             r.file_bytes, r.file_count, r.file_index, index,
+             (r.index && r.file_index == r.index_checksum) ? "yes" : "no",
+             r.usable ? "yes" : "no", r.file_unfinished ? "yes" : "no");
+  } else {
+    ESP_LOGI(TAG, "state queue_file=absent loaded_index=%s unfinished=%s",
+             index, r.file_unfinished ? "yes" : "no");
+  }
+  return NULL;
+}
+
 // The screen shows the player's state but is redrawn only when the UI task
 // has something to handle. A key event with no key makes it look again, so
 // that a change made from here shows up.
@@ -513,6 +568,8 @@ static void run_line(const char *line) {
     why = cmd_scan();
   } else if (strcmp(word, "lib") == 0) {
     why = cmd_lib(args);
+  } else if (strcmp(word, "state") == 0) {
+    why = cmd_state(args);
   } else {
     why = "unknown command";
   }

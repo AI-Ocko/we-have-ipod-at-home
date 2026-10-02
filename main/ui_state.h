@@ -7,6 +7,7 @@
 #include "library.h"
 #include "player.h"
 #include "screen.h"
+#include "state_task.h"
 #include "tracklist.h"
 #include <stdbool.h>
 #include <stdint.h>
@@ -89,6 +90,9 @@ typedef struct {
 
   // The volume bar: on the bottom row until this time. 0 when it is off.
   int64_t volume_until_us;
+
+  // The settings as they were last handed to the state task to be saved.
+  state_settings_t settings;
 
   // The key test screen.
   bool keytest_any; // an event has been shown

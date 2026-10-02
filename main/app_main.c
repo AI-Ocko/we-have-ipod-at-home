@@ -8,6 +8,7 @@
 #include "library_task.h"
 #include "pins.h"
 #include "player.h"
+#include "state_task.h"
 #include "storage.h"
 #include "ui.h"
 #include <inttypes.h>
@@ -88,7 +89,12 @@ static void wait_for_card(void) {
 }
 
 void app_main(void) {
-  // Screen and keys first: they work with or without a card. Without the
+  // What was saved comes first: the UI task starts from the saved settings.
+  // It reads flash only (about 15 ms), and whatever goes wrong it has said
+  // so in the log and the player runs on the defaults.
+  state_task_start();
+
+  // Then screen and keys: they work with or without a card. Without the
   // UI's queues nothing else can be started.
   esp_err_t err = ui_start(&s_queues);
   if (err != ESP_OK) {
@@ -109,6 +115,9 @@ void app_main(void) {
     ESP_LOGE(TAG, "The player failed to start (%s)", esp_err_to_name(err));
     return;
   }
+  state_settings_t settings;
+  state_task_loaded_settings(&settings);
+  player_set_volume(settings.volume);
   // The console is a test aid; the player works without it.
   err = debug_console_start(s_queues.keys);
   if (err != ESP_OK) {
@@ -120,6 +129,10 @@ void app_main(void) {
   library_task_start(s_queues.library_status);
 
   wait_for_card();
+
+  // The saved queue is read before the index is loaded, so that it is in
+  // memory when the UI first sees the index and asks for it.
+  state_task_card_ready();
 
   // Load the library's index, or scan the card if there is none. Nothing
   // plays by itself: the UI shows the main menu and waits for the user.

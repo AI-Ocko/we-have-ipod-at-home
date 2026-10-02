@@ -17,6 +17,7 @@
 //                            track as the one D starts again, and does not
 //                            go on to the next track of its list
 //   vol <n>                  player_set_volume (any integer; the player clamps)
+//                            Not saved: only a volume set with the keys is.
 //   seek <signed ms>         player_seek_rel
 //   key <char>               a press and a release of that key
 //   long <char>              a press, a long press and a release
@@ -41,6 +42,11 @@
 //                            `ok` means it has started; its progress and
 //                            result are logged under the tag `library`.
 //   lib ...                  what is in the library index; see below.
+//   state                    what is saved for the next power-on; see below.
+//   state clear              erase all of it: the settings and the position
+//                            in flash, the queue file on the card. What the
+//                            running player holds is not changed, and is
+//                            saved again when it next changes.
 //
 // THE `lib` COMMANDS
 //
@@ -74,6 +80,34 @@
 // where `capped` is there if the limit of 50 is what ended it. With no
 // library (none loaded yet, a scan is running, or the last scan failed)
 // every `lib` command answers `err lib...: no library (...)`.
+//
+// THE `state` COMMAND
+//
+// Prints two lines, read back from flash and from the card at that moment
+// (state_task.h):
+//
+//   state flash=<ok|unusable> volume=<n> shuffle=<0|1> loop=<0|1|2>
+//     position=<n> track=<n> elapsed_ms=<n> stack_free=<bytes>
+//                                                     (all on one line)
+//   state queue_file=present bytes=<n> count=<n> index=<8 hex digits>
+//     loaded_index=<8 hex digits> match=<yes|no> usable=<yes|no>
+//     unfinished=<yes|no>                             (all on one line)
+//
+// A value that is not saved is printed as `-`. `position` is the place in
+// the queue, `track` the track number that was there, `elapsed_ms` the time
+// into it; `stack_free` is how much of the state task's stack has never
+// been used. `count` and `index` are what the queue file's header says: how
+// many tracks, and the checksum of the library index they belong to;
+// `loaded_index` is the checksum of the index now loaded (`-` if none), and
+// `match` whether the two are the same. `usable` is the real test: whether
+// the file is whole and would be restored with the loaded index. `unfinished`
+// says that the file of an interrupted save (queue.bin.tmp) is there too.
+// With no queue file the second line is
+//
+//   state queue_file=absent loaded_index=<...> unfinished=<yes|no>
+//
+// Both commands wait for the state task, which may be in the middle of a
+// save: up to a second or so.
 //
 // The path of `play` is everything after the command word, spaces included,
 // with spaces at either end removed. If the last word of the line is made of

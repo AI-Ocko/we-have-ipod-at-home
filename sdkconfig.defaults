@@ -19,3 +19,17 @@ CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
 # the PSRAM cache workaround needed only by older chips, which slows every
 # PSRAM access and uses about 15KB of IRAM.
 CONFIG_ESP32_REV_MIN_3=y
+
+# The application is larger than the 1 MB the default partition table gives
+# it. This table has the same data partitions at the same places (nvs, where
+# the settings are saved, is 24 KB at 0x9000) and a 1.5 MB application.
+CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y
+
+# The I2S interrupt must run while flash is being written. Saving a setting
+# writes flash, and now and then erases a 4 KB page, which takes 29 ms; code
+# in flash, interrupts included, is held up for that long on both cores. The
+# I2S interrupt hands each buffer it has sent back to be refilled, once every
+# 11 ms at 44.1 kHz. Held up for 29 ms it missed a buffer, and the DMA played
+# that buffer's old contents a second time (measured: one late interrupt per
+# page erase; none with this option). It adds about 700 bytes to the firmware.
+CONFIG_I2S_ISR_IRAM_SAFE=y
