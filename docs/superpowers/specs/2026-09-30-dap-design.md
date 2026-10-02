@@ -445,7 +445,7 @@ resume). All queries read memory only and never touch the SD card.
 ## 7. Play queue
 
 `play_queue` holds an ordered list of track ids, a current position, the
-shuffle flag and the loop mode (off, all, one).
+shuffle flag and the loop mode (off, all, one). It holds at most 8,192 tracks.
 
 - **Selecting a track** in a list replaces the queue with that whole list (the
   album, the artist's songs, the playlist, or all songs) and starts at the
@@ -587,14 +587,21 @@ backlight off; it then resets to off.
 
 Stored in NVS: volume, shuffle, loop mode, backlight timeout.
 
-Resume state: the queue (as paths) is written to `/.dap/queue.m3u` whenever it
-changes. The current queue position and elapsed time are written to NVS on
-track change, on pause, and every 30 seconds during playback.
+Resume state: the queue is written to `/.dap/queue.bin` whenever it changes:
+its two orders as track numbers, with the checksum of the index they belong
+to. (Amended in stage 6. The first design stored paths in an M3U file, about
+350 KB for a 5,000-track queue; track numbers are about 20 KB, and because a
+scan of the same card always produces the identical index, they stay valid
+across rescans.) The current queue position and elapsed time are written to
+NVS on track change, on pause, and every 30 seconds during playback.
 
-At boot, if the queue file loads and its current track still exists in the
-index, the player opens Now Playing in the **paused** state on that track, at
-the saved time if seeking is supported for its format, otherwise at 0. It does
-not start making sound until the user presses play.
+All saving is done by a separate low-priority task, so the interface never
+waits on flash or the card.
+
+At boot, if the queue file loads and was saved for the index now loaded, the
+player opens Now Playing in the **paused** state on the remembered track at
+the saved time. It does not start making sound until the user presses play.
+If the index has changed since, the queue starts empty.
 
 ## 11. Failure handling
 
