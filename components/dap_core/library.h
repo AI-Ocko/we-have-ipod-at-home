@@ -110,6 +110,10 @@ typedef struct {
 // UINT32_MAX for the album and artist, and zeros.
 bool library_track(const library_t *lib, uint32_t track, library_track_t *out);
 
+// The track's title alone, for a list that shows nothing else: it reads the
+// track's row and no other. "" if `track` is out of range.
+const char *library_track_title(const library_t *lib, uint32_t track);
+
 // Write the track's path (as given to the builder) into `out`. Returns the
 // length it needs, like snprintf; 0, and an empty string, if `track` is out
 // of range.

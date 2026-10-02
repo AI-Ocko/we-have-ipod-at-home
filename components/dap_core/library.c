@@ -1785,6 +1785,17 @@ bool library_track(const library_t *lib, uint32_t track, library_track_t *out) {
   return true;
 }
 
+// One field of the track's row. library_track would also read the format
+// table and the album's row, which a list of titles has no use for.
+const char *library_track_title(const library_t *lib, uint32_t track) {
+  if (track >= library_track_count(lib)) {
+    return EMPTY;
+  }
+  return pool_text(lib, row32(table(lib, FIELD(lib, off_tracks)) +
+                              track * sizeof(track_row_t) +
+                              offsetof(track_row_t, title)));
+}
+
 // The track's row, its folder's row, and the two strings.
 size_t library_track_path(const library_t *lib, uint32_t track, char *out,
                           size_t out_size) {

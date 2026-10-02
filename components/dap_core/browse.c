@@ -133,9 +133,9 @@ static uint32_t count_of(const browse_level_t *level, const library_t *lib) {
 //   an artist       library_artist_albums; then, for an album row,
 //                   library_album_name
 //   Albums          library_album_by_name, library_album_name
-//   an album        library_album_tracks, library_track
-//   artist's songs  library_artist_tracks, library_track
-//   Songs           library_song_by_title, library_track
+//   an album        library_album_tracks, library_track_title
+//   artist's songs  library_artist_tracks, library_track_title
+//   Songs           library_song_by_title, library_track_title
 static const char *item_text(const browse_level_t *level, const library_t *lib,
                              uint32_t index) {
   switch (level->screen) {
@@ -159,12 +159,11 @@ static const char *item_text(const browse_level_t *level, const library_t *lib,
   }
   case BROWSE_ARTIST_SONGS:
   case BROWSE_ALBUM:
-  case BROWSE_SONGS: {
-    // No track gives a row of empty strings.
-    library_track_t track;
-    library_track(lib, tracklist_track(lib, tracks_of(level), index), &track);
-    return track.title;
-  }
+  case BROWSE_SONGS:
+    // Only the title is wanted, so only the track's own row is read; no
+    // track at that position gives "".
+    return library_track_title(lib,
+                               tracklist_track(lib, tracks_of(level), index));
   }
   return "";
 }

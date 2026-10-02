@@ -1340,6 +1340,73 @@ static void make_order_tracks(bool spellings) {
   }
 }
 
+void test_track_title_matches_library_track(void) {
+  // Titles that share text with other fields and with each other, one that
+  // is empty, and one used twice.
+  const library_track_in_t tracks[] = {
+      trk("b/y/1.flac", "b-y-1", "B", "Y", "B", 1, 0),
+      trk("a/x/2.flac", "A", "A", "X", "A", 2, 0),
+      trk("b/x/1.flac", "X", "B", "X", "B", 1, 0),
+      trk("c/x/1.flac", "", "C", "X", "C", 1, 0),
+      trk("b/y/2.flac", "Twice", "B", "Y", "B", 2, 0),
+      trk("a/x/1.flac", "Twice", "A", "X", "A", 1, 0),
+      trk("b/x/2.flac", "A title rather longer than the others", "B", "X", "B",
+          2, 0),
+  };
+  const library_t *lib = build(tracks, 7);
+  size_t titles_len = 0;
+  for (uint32_t t = 0; t < 7; t++) {
+    library_track_t whole;
+    TEST_ASSERT_TRUE(library_track(lib, t, &whole));
+    const char *title = library_track_title(lib, t);
+    TEST_ASSERT_NOT_NULL(title);
+    TEST_ASSERT_EQUAL_STRING(whole.title, title);
+    // The same string in the index, not a copy of it.
+    TEST_ASSERT_EQUAL_PTR(whole.title, title);
+    titles_len += strlen(title);
+  }
+  // Every title was met, whatever numbers the tracks were given.
+  size_t want_len = 0;
+  for (size_t i = 0; i < 7; i++) {
+    want_len += strlen(tracks[i].title);
+  }
+  TEST_ASSERT_EQUAL_size_t(want_len, titles_len);
+  // In track order: artist A (album X: tracks 1, 2), B (X, then Y), C.
+  TEST_ASSERT_EQUAL_STRING("Twice", library_track_title(lib, 0));
+  TEST_ASSERT_EQUAL_STRING("A", library_track_title(lib, 1));
+  TEST_ASSERT_EQUAL_STRING("X", library_track_title(lib, 2));
+  TEST_ASSERT_EQUAL_STRING("A title rather longer than the others",
+                           library_track_title(lib, 3));
+  TEST_ASSERT_EQUAL_STRING("b-y-1", library_track_title(lib, 4));
+  TEST_ASSERT_EQUAL_STRING("Twice", library_track_title(lib, 5));
+  TEST_ASSERT_EQUAL_STRING("", library_track_title(lib, 6));
+
+  // Out of range: "" and never NULL, like the names of artists and albums.
+  const uint32_t beyond[] = {7, 8, 65535, 65536, 0x7FFFFFFFu, 0xFFFFFFFFu};
+  for (size_t i = 0; i < sizeof(beyond) / sizeof(beyond[0]); i++) {
+    const char *title = library_track_title(lib, beyond[i]);
+    TEST_ASSERT_NOT_NULL(title);
+    TEST_ASSERT_EQUAL_STRING("", title);
+  }
+  // A NULL library is an empty one, as for every other query.
+  TEST_ASSERT_EQUAL_STRING("", library_artist_name(NULL, 0));
+  TEST_ASSERT_NOT_NULL(library_track_title(NULL, 0));
+  TEST_ASSERT_EQUAL_STRING("", library_track_title(NULL, 0));
+  TEST_ASSERT_EQUAL_STRING("", library_track_title(NULL, 0xFFFFFFFFu));
+
+  // And the same after a save and a load into other memory.
+  const library_t *loaded = NULL;
+  FILE *f = fresh_tmp();
+  TEST_ASSERT_EQUAL(LIBRARY_OK, library_save(lib, f));
+  rewind(f);
+  TEST_ASSERT_EQUAL(LIBRARY_OK, library_load(ARENA_B, ARENA_BYTES, f, &loaded));
+  for (uint32_t t = 0; t < 7; t++) {
+    TEST_ASSERT_EQUAL_STRING(library_track_title(lib, t),
+                             library_track_title(loaded, t));
+  }
+  TEST_ASSERT_EQUAL_STRING("", library_track_title(loaded, 7));
+}
+
 void test_order_of_adding_does_not_change_the_result(void) {
   make_order_tracks(true);
   const library_t *lib =
@@ -1841,6 +1908,9 @@ static void ask_everything(const library_t *lib) {
       TEST_ASSERT_TRUE(info.group_artist < n_artists);
       TEST_ASSERT_TRUE(library_song_by_title(lib, t) < n_tracks);
     }
+    // The title by itself is the same string, and "" one past the end.
+    TEST_ASSERT_EQUAL_PTR(info.title, library_track_title(lib, t));
+    text += strlen(library_track_title(lib, t));
     size_t len = library_track_path(lib, t, path_a, sizeof(path_a));
     TEST_ASSERT_TRUE(len < sizeof(path_a));
     TEST_ASSERT_EQUAL_size_t(len, strlen(path_a));
@@ -2452,6 +2522,7 @@ int main(void) {
   RUN_TEST(test_find_path_ignores_ascii_case);
   RUN_TEST(test_the_same_path_twice_is_two_tracks);
   RUN_TEST(test_out_of_range_numbers_are_safe);
+  RUN_TEST(test_track_title_matches_library_track);
   RUN_TEST(test_order_of_adding_does_not_change_the_result);
   RUN_TEST(test_order_of_adding_does_not_matter_when_tracks_are_nearly_equal);
   RUN_TEST(test_differing_spellings_give_the_same_file_in_any_order);
