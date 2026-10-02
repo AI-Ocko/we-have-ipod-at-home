@@ -1,5 +1,6 @@
 #include "mp3_xing.h"
 
+#include <stdbool.h>
 #include <string.h>
 
 #define FRAME_HEADER_BYTES 4
@@ -9,30 +10,39 @@
 #define RATE_RESERVED 3
 #define MODE_MONO 3
 #define XING_FLAG_FRAMES 0x01
+#define BITRATE_INVALID 15
 
 static uint32_t be32(const uint8_t *p) {
   return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
          ((uint32_t)p[2] << 8) | p[3];
 }
 
-uint32_t mp3_xing_duration_ms(const uint8_t *p, size_t len) {
+// True if `p` begins with a frame header this module understands.
+//
+// Frame header: 11 bits of sync, version (2), layer (2), protection (1);
+// bit rate (4), sample rate (2), padding (1), private (1); channel mode (2)
+// and five bits that do not matter here.
+static bool layer3_header(const uint8_t *p, size_t len) {
   if (len < FRAME_HEADER_BYTES) {
-    return 0;
+    return false;
   }
-  // Frame header: 11 bits of sync, version (2), layer (2), protection (1);
-  // bit rate (4), sample rate (2), padding (1), private (1); channel mode (2)
-  // and five bits that do not matter here.
   if (p[0] != 0xFF || (p[1] & 0xE0) != 0xE0) {
-    return 0;
+    return false;
   }
   unsigned version = (p[1] >> 3) & 0x03;
   unsigned layer = (p[1] >> 1) & 0x03;
   unsigned rate_index = (p[2] >> 2) & 0x03;
-  unsigned mode = p[3] >> 6;
-  if (version == VERSION_RESERVED || layer != LAYER_III ||
-      rate_index == RATE_RESERVED) {
+  return version != VERSION_RESERVED && layer == LAYER_III &&
+         rate_index != RATE_RESERVED;
+}
+
+uint32_t mp3_xing_duration_ms(const uint8_t *p, size_t len) {
+  if (!layer3_header(p, len)) {
     return 0;
   }
+  unsigned version = (p[1] >> 3) & 0x03;
+  unsigned rate_index = (p[2] >> 2) & 0x03;
+  unsigned mode = p[3] >> 6;
 
   // MPEG-1 rates; MPEG-2 halves them and MPEG-2.5 halves them again, and
   // both of those put half as many samples in a frame.
@@ -67,4 +77,27 @@ uint32_t mp3_xing_duration_ms(const uint8_t *p, size_t len) {
   uint64_t samples = (uint64_t)be32(tag + 8) * samples_per_frame; // < 2^43
   uint64_t ms = samples * 1000 / rate;
   return ms > UINT32_MAX ? UINT32_MAX : (uint32_t)ms;
+}
+
+bool mp3_frame_header(const uint8_t *p, size_t len, uint32_t *bitrate) {
+  *bitrate = 0;
+  if (!layer3_header(p, len)) {
+    return false;
+  }
+  // Kilobits per second by index. Index 0 is "free format": any rate the
+  // encoder liked, not stated in the header. Index 15 is not allowed, so a
+  // header with it is not a header.
+  static const uint16_t MPEG1_KBPS[15] = {0,   32,  40,  48,  56,  64,  80, 96,
+                                          112, 128, 160, 192, 224, 256, 320};
+  static const uint16_t MPEG2_KBPS[15] = {0,  8,  16, 24,  32,  40,  48, 56,
+                                          64, 80, 96, 112, 128, 144, 160};
+  unsigned version = (p[1] >> 3) & 0x03;
+  unsigned index = p[2] >> 4;
+  if (index == BITRATE_INVALID) {
+    return false;
+  }
+  // MPEG-2 and MPEG-2.5 share a table.
+  *bitrate = 1000u *
+             (version == VERSION_MPEG1 ? MPEG1_KBPS[index] : MPEG2_KBPS[index]);
+  return true;
 }

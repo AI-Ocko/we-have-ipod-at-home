@@ -35,6 +35,16 @@ typedef enum {
 // (including an offset too large for `long`) is FLAC_HEADER_TRUNCATED.
 flac_header_result_t flac_header_read(FILE *f, flac_header_t *out);
 
+// The size of a STREAMINFO block's body.
+#define FLAC_STREAMINFO_BYTES 34
+
+// Unpack the body of a STREAMINFO block that the caller has read: everything
+// in `*out` except `audio_start`, which only walking the file's other blocks
+// can give and which is left as it was. For a reader that wants the format
+// and the length but not the walk (flac_header_read does both).
+void flac_header_unpack_streaminfo(const uint8_t body[FLAC_STREAMINFO_BYTES],
+                                   flac_header_t *out);
+
 // Track length in milliseconds, or 0 if total_frames or sample_rate is 0.
 // Rounds down; a length that does not fit is reported as UINT32_MAX.
 uint32_t flac_header_duration_ms(const flac_header_t *h);

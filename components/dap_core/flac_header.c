@@ -10,7 +10,7 @@
 #define BLOCK_LAST 0x80
 #define BLOCK_TYPE_MASK 0x7F
 #define BLOCK_TYPE_STREAMINFO 0
-#define STREAMINFO_LEN 34
+#define STREAMINFO_LEN FLAC_STREAMINFO_BYTES
 
 static const char MARKER[4] = {'f', 'L', 'a', 'C'};
 
@@ -41,6 +41,21 @@ static flac_header_result_t short_marker(const uint8_t *got_bytes, size_t got,
     return FLAC_HEADER_TRUNCATED;
   }
   return FLAC_HEADER_NOT_FLAC;
+}
+
+void flac_header_unpack_streaminfo(const uint8_t b[FLAC_STREAMINFO_BYTES],
+                                   flac_header_t *out) {
+  // Bytes 0..9: block sizes (16 + 16 bits), frame sizes (24 + 24 bits).
+  // Bytes 10..17, bit-packed: rate (20), channels - 1 (3), bits - 1 (5),
+  // total samples (36). The rest is the MD5 of the audio.
+  out->max_frame_bytes = be24(&b[7]);
+  out->sample_rate =
+      ((uint32_t)b[10] << 12) | ((uint32_t)b[11] << 4) | (b[12] >> 4);
+  out->channels = (uint8_t)(((b[12] >> 1) & 0x07) + 1);
+  out->bits_per_sample =
+      (uint8_t)((((b[12] & 0x01) << 4) | (b[13] >> 4)) + 1);
+  out->total_frames = ((uint64_t)(b[13] & 0x0F) << 32) |
+                      ((uint64_t)be24(&b[14]) << 8) | b[17];
 }
 
 flac_header_result_t flac_header_read(FILE *f, flac_header_t *out) {
@@ -100,17 +115,8 @@ flac_header_result_t flac_header_read(FILE *f, flac_header_t *out) {
   }
   pos += BLOCK_HEADER_LEN + STREAMINFO_LEN;
 
-  // Bytes 0..9: block sizes (16 + 16 bits), frame sizes (24 + 24 bits).
-  // Bytes 10..17, bit-packed: rate (20), channels - 1 (3), bits - 1 (5),
-  // total samples (36). The rest is the MD5 of the audio.
   flac_header_t h;
-  h.max_frame_bytes = be24(&b[7]);
-  h.sample_rate =
-      ((uint32_t)b[10] << 12) | ((uint32_t)b[11] << 4) | (b[12] >> 4);
-  h.channels = (uint8_t)(((b[12] >> 1) & 0x07) + 1);
-  h.bits_per_sample = (uint8_t)((((b[12] & 0x01) << 4) | (b[13] >> 4)) + 1);
-  h.total_frames = ((uint64_t)(b[13] & 0x0F) << 32) |
-                   ((uint64_t)be24(&b[14]) << 8) | b[17];
+  flac_header_unpack_streaminfo(b, &h);
 
   // Step over the remaining blocks. Every pass consumes four bytes of the
   // file for a block header, so this ends at the end of the file at the

@@ -36,6 +36,7 @@ add_library(dap_core STATIC
   ${CORE_DIR}/id3.c
   ${CORE_DIR}/mp3_xing.c
   ${CORE_DIR}/marquee.c
+  ${CORE_DIR}/tags.c
 )
 target_include_directories(dap_core PUBLIC ${CORE_DIR})
 
@@ -56,6 +57,13 @@ dap_test(test_pcm)
 dap_test(test_id3)
 dap_test(test_mp3_xing)
 dap_test(test_marquee)
+dap_test(test_tags)
 # The FLAC files made by tools/make_test_audio.sh.
 target_compile_definitions(test_flac_header PRIVATE
   FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures")
+# The tagged files made by tools/make_test_audio.sh; fixtures/tags/README.md
+# lists what each one holds.
+target_compile_definitions(test_tags PRIVATE
+  FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/tags")
+# Its tests count the fread and fseek calls that tags_read makes.
+target_link_options(test_tags PRIVATE -Wl,--wrap=fread -Wl,--wrap=fseek)

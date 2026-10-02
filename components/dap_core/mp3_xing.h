@@ -1,5 +1,6 @@
 #pragma once
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -27,3 +28,9 @@
 // The count includes the encoder's padding at both ends (about 30 ms in a
 // 44.1 kHz file), so the result is that much longer than what is heard.
 uint32_t mp3_xing_duration_ms(const uint8_t *frame, size_t len);
+
+// True if `frame` begins with the header of an MPEG-1, MPEG-2 or MPEG-2.5
+// Layer III frame. `*bitrate` is then the bit rate the header states, in
+// bits per second, or 0 for a "free format" frame, which does not state one.
+// Without a Xing/Info header this is all there is to estimate a length from.
+bool mp3_frame_header(const uint8_t *frame, size_t len, uint32_t *bitrate);

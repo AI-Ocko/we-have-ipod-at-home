@@ -183,6 +183,65 @@ static void test_huge_count_does_not_overflow(void) {
   TEST_ASSERT_EQUAL_UINT32(4294967256u, mp3_xing_duration_ms(img, sizeof(img)));
 }
 
+// --- The frame header alone
+// ---------------------------------------------------
+
+static void test_frame_header_bitrates(void) {
+  static const uint16_t V1[16] = {0,   32,  40,  48,  56,  64,  80,  96,
+                                  112, 128, 160, 192, 224, 256, 320, 0};
+  static const uint16_t V2[16] = {0,  8,  16, 24,  32,  40,  48,  56,
+                                  64, 80, 96, 112, 128, 144, 160, 0};
+  static const unsigned VERSIONS[] = {MPEG1, MPEG2, MPEG25};
+  for (size_t v = 0; v < 3; v++) {
+    const uint16_t *kbps = (VERSIONS[v] == MPEG1) ? V1 : V2;
+    for (unsigned index = 0; index < 15; index++) {
+      img_frame(VERSIONS[v], 0, STEREO);
+      img[2] = (uint8_t)(index << 4);
+      uint32_t bitrate = 12345;
+      TEST_ASSERT_TRUE(mp3_frame_header(img, 4, &bitrate));
+      // Index 0 is "free format": a frame, but one that states no rate.
+      TEST_ASSERT_EQUAL_UINT32(kbps[index] * 1000u, bitrate);
+    }
+  }
+}
+
+static void test_frame_header_rejects_what_is_not_layer_iii(void) {
+  uint32_t bitrate = 12345;
+  img_frame(MPEG1, 0, STEREO);
+  TEST_ASSERT_TRUE(mp3_frame_header(img, 4, &bitrate));
+  TEST_ASSERT_EQUAL_UINT32(128000, bitrate);
+
+  // Too short to hold a header; the bitrate is zeroed all the same.
+  for (size_t len = 0; len < 4; len++) {
+    uint8_t exact[4];
+    memcpy(exact + 4 - len, img, len);
+    bitrate = 12345;
+    TEST_ASSERT_FALSE(mp3_frame_header(exact + 4 - len, len, &bitrate));
+    TEST_ASSERT_EQUAL_UINT32(0, bitrate);
+  }
+
+  uint8_t first = img[0], second = img[1], third = img[2];
+  img[0] = 0xFE; // no sync
+  TEST_ASSERT_FALSE(mp3_frame_header(img, 4, &bitrate));
+  img[0] = first;
+  img[1] = (uint8_t)(second & ~0x20); // ten sync bits only
+  TEST_ASSERT_FALSE(mp3_frame_header(img, 4, &bitrate));
+  img[1] = (uint8_t)((second & ~0x18) | (1 << 3)); // reserved version
+  TEST_ASSERT_FALSE(mp3_frame_header(img, 4, &bitrate));
+  img[1] = (uint8_t)((second & ~0x06) | (2 << 1)); // Layer II
+  TEST_ASSERT_FALSE(mp3_frame_header(img, 4, &bitrate));
+  img[1] = (uint8_t)((second & ~0x06) | (3 << 1)); // Layer I
+  TEST_ASSERT_FALSE(mp3_frame_header(img, 4, &bitrate));
+  img[1] = (uint8_t)(second & ~0x06); // reserved layer (a FLAC frame's sync)
+  TEST_ASSERT_FALSE(mp3_frame_header(img, 4, &bitrate));
+  img[1] = second;
+  img[2] = (uint8_t)(third | (3 << 2)); // reserved sample rate
+  TEST_ASSERT_FALSE(mp3_frame_header(img, 4, &bitrate));
+  img[2] = (uint8_t)(third | 0xF0); // the bit rate index that means nothing
+  TEST_ASSERT_FALSE(mp3_frame_header(img, 4, &bitrate));
+  TEST_ASSERT_EQUAL_UINT32(0, bitrate);
+}
+
 int main(void) {
   UNITY_BEGIN();
   RUN_TEST(test_real_cbr_stereo_file);
@@ -195,5 +254,7 @@ int main(void) {
   RUN_TEST(test_not_a_frame);
   RUN_TEST(test_short_input_reads_nothing_beyond_it);
   RUN_TEST(test_huge_count_does_not_overflow);
+  RUN_TEST(test_frame_header_bitrates);
+  RUN_TEST(test_frame_header_rejects_what_is_not_layer_iii);
   return UNITY_END();
 }
