@@ -388,13 +388,29 @@ conversion happens once at scan time.
 
 ### Scan
 
-Walks the whole card recursively. Skips directories whose names start with `.`
-(which covers the player's own `/.dap/`) and `System Volume Information`.
+Walks the whole card recursively. Skips directories and files whose names
+start with `.` (which covers the player's own `/.dap/` and the hidden
+companion files a Mac writes beside music) and `System Volume Information`.
 Reads tags for each `.flac` and `.mp3`. Playback is stopped before a scan
-starts.
+starts. A file with a music extension that is not really music is still
+listed, by file name, under `Unknown Artist`.
 
 Triggers: no usable index at boot (automatic), or **Settings → Rescan library**.
 The screen shows a running count of tracks found.
+
+Measured on the board in stage 4 (1,028 tracks, three folder levels, ten files
+per folder): 6.4 seconds, about 160 tracks per second. Opening each file is
+59% of that and reading its tags 16%. Loading the saved index at boot takes
+35 ms; a 5,000-track index is estimated at 0.35 to 0.4 s to load and 30 to 50 s
+to scan.
+
+Known weakness: the card's file system finds a file by searching its folder
+from the start, so opening the n-th file of a folder costs about 0.17 ms times
+n. Folders of album size are unaffected; a folder of 400 files scans at about
+27 files per second, and one of 1,000 would take about 86 seconds. Music
+should be kept in artist and album folders. A sector cache under the file
+system would remove this penalty and roughly halve scan time; it is a
+candidate for the finishing stage.
 
 ### Index
 
@@ -415,8 +431,9 @@ CRC at boot triggers an automatic rescan.
 
 ### Limits
 
-Design target: 5,000 tracks (about 650 KB at ~130 bytes per track). Hard cap:
-1.5 MB of index memory. If a scan reaches the cap, it stops, keeps what it has
+Design target: 5,000 tracks. Measured in stage 4: about 97 bytes per track
+for a realistic library (486 KB for 5,000 tracks), and the 1.5 MB arena holds
+about 7,400 tracks. Hard cap: 1.5 MB of index memory. If a scan reaches the cap, it stops, keeps what it has
 indexed, saves it, and shows "Library full".
 
 ### Queries
