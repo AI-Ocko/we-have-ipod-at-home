@@ -58,6 +58,24 @@ Not in this stage (do not build): playlists, "Add to playlist", "Save queue as p
 7. **Saving must not be heard.** NVS commits and the queue file being written while music plays. Pinned in Task 3 by forcing hundreds of saves during playback: exact frame count, no underrun.
 8. **Keys on release.** A long press of `4` or `6` must not also skip a track when released; a quick tap must. Pinned in Task 4.
 
+## Amendments made during implementation
+
+Decided by the controller while the stage ran; the code follows these where they differ from the text below.
+
+- `play_queue.h` also has `bool play_queue_set_position(play_queue_t *q, uint32_t position)` (resume needs it). `play_queue_set_shuffle` with the value it already has does nothing.
+- Loop one plus a manual Next at the last track stops playback; only loop all wraps.
+- NVS is the authority for volume, shuffle, loop and the position. The position record is three values: queue position, the track number there, and elapsed ms. At power-on: restore the queue file; use the NVS position and time if `position < count` and `play[position]` is that track; apply loop and shuffle from NVS; if the position was not placed, use the time when the queue now stands on the saved track, and otherwise find the saved track in the play order.
+- The queue file is rewritten only when the queue's contents change (load, insert, append, shuffle, clear); next, previous and track ends save only the NVS position, which keeps them O(1). A failed queue-file write is retried with a back-off.
+- A scan or a console `stop` keeps the resume time of a queue track that survives. When the queue is cleared or changes under a console-played track, the NVS position is rewritten to match.
+- The app partition is single-app-large (1.5 MB). `CONFIG_I2S_ISR_IRAM_SAFE=y`: without it an NVS page erase delayed the I2S interrupt about 29 ms and a stale DMA buffer was replayed, which frame counts cannot see.
+- Internal data RAM while playing is about 39 KB, so the queue arrays and the state task's copies live in PSRAM, and the queue file is written unbuffered.
+
+Deferred by the reviews (none blocks this stage's hardware check):
+
+- Stage 7: one shared CRC-32 in `dap_core` (now in both `library.c` and `play_queue.c`); derive `browse_select` from `browse_target` when playlist rows add targets; extend `test_options`' text-fit loop for `Add to playlist`; the `/dev/full` branch of `test_play_queue` leaks a `FILE` and skips silently.
+- Stage 8: after an MP3 then a FLAC the largest free internal block falls to 14 KB (player-side; check in the hour-long run); a superseded failed queue save leaves a retry deadline armed, so the newer queue can be written early (harmless, at most one extra write); a refused `player_play` should send `player_stop`; confirmations linger 1.5 s after the options menu closes; a `.tmp` queue file that could not be read is discarded rather than kept; stale explanations in `state_task.c` (unbuffered writes, the no-card retry log).
+- Accepted limitations: a track queued twice resumes at its first occurrence on shuffle-off; with shuffle on, Play next searches the original order (bounded by the insert's own move).
+
 ## File Structure
 
 | Path | Responsibility | Task |
@@ -309,7 +327,7 @@ Board checks:
 2. Loop: `3` to loop all: next from the last track wraps to the first. `3` again to loop one: let a 0.1 s track end by itself several times: the same path starts each time; a manual `6` advances. `screen` shows the marks changing and the confirmations.
 3. Shuffle: load an artist's `All songs` on `/lib1000/` (100 tracks), press `1`: `queue` shows the current track first and 100 distinct tracks; let them play: 100 `STARTED` lines, 100 distinct paths, not in album order. `1` again: the order returns and the current track is unchanged.
 4. Options: `#` on a track: `Play next` then `Add to queue` on two other tracks: `queue` shows them in the right places. `#` on an album: `Add to queue` adds its tracks; `Shuffle play` on an artist. `#` on `All songs`, the main menu and Settings rows does nothing. `#` closes the menu.
-5. Queue full: add `Songs` (1,028) repeatedly until the queue cannot take a whole list: `Queue full`, nothing half-added (`queue` count unchanged), everything still works.
+5. Queue full: load `Songs` (1,028), then add a 100-track artist from `/lib1000/` repeatedly with `#` > `Add to queue` until the queue cannot take a whole list: `Queue full`, nothing half-added (`queue` count unchanged), everything still works. (Amended after implementation: `Songs` is a main-menu row and has no options, so it cannot be added as a list.)
 6. Release semantics (Review Focus 8): `key 6` skips once; `long 6` (press, long, release) does not skip. Same for `4`.
 7. Resume: with the music track playing at about 40 s, shuffle on, loop all, volume 12: wait for a 30-second save, reset the board. After boot: `screen` shows Now Playing with the music track's title, the pause symbol and a time within 30 s of where it was; `stat` shows idle (no sound); `queue` and the marks are as before; volume 12. `key D`: `STARTED` and the first `POSITION` is near the saved time. Then repeat with a pause before the reset (the saved time is then exact to within a second).
 8. Rescan with a queue (Review Focus 6): `scan` (same card, same index): after it, `queue` is unchanged and `D` resumes. Then force a different index (a temporary build or command that drops one track from the scan, not committed): the queue is cleared.
@@ -325,7 +343,7 @@ Board checks:
 
 ## Stage 6 hardware check (run by the user)
 
-On the phone charger.
+On the phone charger. This stage changed the partition table: the first flash from a computer must be a full `idf.py flash`, not `app-flash`.
 
 1. **Next and previous** on Now Playing with `6` and `4`: a tap skips; previous restarts the track if it is more than a few seconds in.
 2. **Shuffle** with `1`: an `S` appears; the album plays in a mixed order; `1` again returns to album order.
@@ -333,3 +351,4 @@ On the phone charger.
 4. **Options** with `#` on a track: `Play next` and `Add to queue` do what they say. On an album: `Shuffle play`.
 5. **Power-off memory:** play something to the middle, set a volume, unplug, plug in again: Now Playing shows the same track, paused, at about the same time; pressing `D` carries on from there; volume, shuffle and loop are as you left them.
 6. **Nothing is heard when it saves:** no click every 30 seconds.
+7. **Audio unchanged** (added after Task 3, which set `CONFIG_I2S_ISR_IRAM_SAFE` to stop a flash erase delaying the audio interrupt): a 24-bit FLAC from `/test/` and an MP3 still sound clean; pause, resume and volume changes make no clicks; changing volume quickly many times in a row (each change is saved) causes no blip.
