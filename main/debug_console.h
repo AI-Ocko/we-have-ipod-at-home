@@ -10,12 +10,14 @@
 // is answered with one log line, tag `dbg`: `ok <line>` or
 // `err <line>: <why>`. A line ends with LF, CR or CRLF.
 //
-//   play <path> [start_ms]   player_play
+//   play <path> [start_ms]   player_play. Also logs `play id=<n>`: the play
+//                            number the track's events will carry.
 //   pause | resume | stop    player_pause / player_resume / player_stop
 //   vol <n>                  player_set_volume (any integer; the player clamps)
 //   seek <signed ms>         player_seek_rel
 //   key <char>               a press and a release of that key
 //   long <char>              a press, a long press and a release
+//   hold <char> <repeats>    a key held down: see below
 //   stat                     logs `stat state=... pos_ms=... vol=... fill=...
 //                            low=...` and more (see player_status.h)
 //   stall <ms>               test aid: the decoder task does nothing for that
@@ -71,6 +73,35 @@
 // "play /sdcard/live at leeds 1970 0".
 //
 // <char> is one of 123A456B789C*0#D (a to d are accepted for A to D).
+//
+// THE `hold` COMMAND
+//
+// `hold <char> <repeats>` posts to the key queue, in this order, what the
+// keypad posts while a key is held: one KEY_PRESS, one KEY_LONG, <repeats>
+// KEY_REPEAT (0 to 2000) and one KEY_RELEASE, all for that key: <repeats> + 3
+// events.
+//
+// They are posted back to back, with no delay between them. A key event
+// carries no time, so the order is all the UI task can see of a held key;
+// the real spacing (600 ms to the long press, then a repeat every 150 ms,
+// every 50 ms once the key has been down 2 s) would only make 2000 repeats
+// take 100 s. Back to back is also the hardest case for the UI task: events
+// arrive as fast as it can take them.
+//
+// No event is dropped silently. The queue holds 16, so each event waits for
+// room, up to 1 s. If the UI task leaves the queue full for that long the
+// command stops posting repeats, still tries to post the release (waiting
+// 1 s once more), and says what happened. It always logs
+//
+//   hold key=<char> repeats=<n> posted=<events posted> dropped=<not posted>
+//
+// and then answers `ok ...` if dropped is 0, otherwise
+// `err ...: key queue full: events were dropped`. The other refusals post
+// nothing: `no such key`, `no repeat count`, `expected one key and a repeat
+// count`, `expected a repeat count, 0 to 2000`.
+//
+// While the command runs the console reads no other line; in practice the UI
+// task takes each event as it is posted (it has the higher priority).
 
 // Start the console task. Key events go to `key_events` (items are
 // key_event_t), the queue the keypad posts to. Call once.

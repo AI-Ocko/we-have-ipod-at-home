@@ -154,7 +154,28 @@ static void ui_render(const ui_t *ui, uint32_t title_ms, screen_t *screen) {
   screen_put(screen, 1, SCREEN_COLS - len, text);
 }
 
+// A key event's type, for the log.
+static const char *key_type_name(key_event_type_t type) {
+  switch (type) {
+  case KEY_PRESS:
+    return "press";
+  case KEY_LONG:
+    return "long";
+  case KEY_REPEAT:
+    return "repeat";
+  case KEY_RELEASE:
+    return "release";
+  }
+  return "?";
+}
+
 static void ui_on_key(ui_t *ui, const key_event_t *event) {
+  // Every key event is logged as it is taken off the queue, so that a script
+  // can see what the UI task received and in what order. The console's "look
+  // again" event has no key and is not one.
+  if (event->key != '\0') {
+    ESP_LOGI(TAG, "KEY %s %c", key_type_name(event->type), event->key);
+  }
   player_status_t status;
   player_get_status(&status);
   bool press = (event->type == KEY_PRESS);
@@ -223,6 +244,12 @@ static void ui_title_from_library(ui_t *ui) {
 }
 
 static void ui_on_player_event(ui_t *ui, const player_event_t *event) {
+  // Which `play` the event is about. A line of its own, ahead of the event's
+  // line: the four below are a fixed format that scripts read.
+  static const char *const TYPE[] = {"started", "position", "ended", "error"};
+  ESP_LOGI(PLAYER_TAG, "EVENT id=%" PRIu32 " type=%s", event->play_id,
+           TYPE[event->type]);
+
   switch (event->type) {
   case PLAYER_EVENT_STARTED: {
     player_get_path(ui->path, sizeof(ui->path));
@@ -517,5 +544,5 @@ void app_main(void) {
     return;
   }
   ESP_LOGI(TAG, "Playing %s", track);
-  player_play(track, 0);
+  player_play(track, 0, NULL);
 }

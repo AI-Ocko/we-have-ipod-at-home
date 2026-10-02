@@ -27,6 +27,7 @@ typedef enum {
 
 typedef struct {
   player_event_type_t type;
+  uint32_t play_id; // which player_play call this event belongs to
   uint32_t position_ms;
   uint32_t duration_ms; // 0 if unknown
   uint32_t sample_rate;
@@ -43,10 +44,27 @@ esp_err_t player_start(QueueHandle_t events);
 // in any state and from any task.
 //
 // A command that cannot be queued (eight are already waiting) is refused with
-// ESP_ERR_TIMEOUT and has no effect. Events of a track that is being replaced
-// can still arrive until the player has taken the new `play` off its queue;
-// after that, none do.
-esp_err_t player_play(const char *path, uint32_t start_ms); // replaces whatever is playing
+// ESP_ERR_TIMEOUT and has no effect.
+//
+// Every event carries the number of the `play` it is about (`play_id`). The
+// player posts events of a track that is being replaced or stopped until it
+// has taken the new `play` or the `stop` off its queue, and none after that;
+// but the events are queued too, so those already posted are read later
+// still. After a `play` or a `stop`, then, events of the earlier track can
+// still be read: at most as many as the event queue holds, and all of them
+// before the first event of the new track. They carry the earlier track's
+// number. Whoever reads the events compares `play_id` with the number of the
+// track it is waiting for and ignores the rest; after a `stop` it is waiting
+// for none.
+
+// Queue a track; it replaces whatever is playing. `play_id`, if not NULL,
+// receives the number that every event about this track will carry. Numbers
+// are never 0 and never repeat within a run. (They start at 1 and go up by
+// one per call, from whichever task; the counter is 32 bits, so "never" is
+// four thousand million tracks.) The number is set before the command is
+// queued, so the caller has it before any event about the track can arrive.
+// If the call fails, no event will ever carry its number and `*play_id` is 0.
+esp_err_t player_play(const char *path, uint32_t start_ms, uint32_t *play_id);
 esp_err_t player_pause(void);
 esp_err_t player_resume(void);
 esp_err_t player_stop(void);

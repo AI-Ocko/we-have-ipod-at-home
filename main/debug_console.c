@@ -23,6 +23,11 @@
 #define RX_BUFFER_BYTES 1024
 #define LINE_MAX_BYTES 400 // a long path and a start position
 #define LIB_LIST_MAX 50     // lines per `lib` listing: more would flood the port
+#define HOLD_MAX_REPEATS 2000
+// How long `hold` waits for room in the key queue before it gives up.
+#define HOLD_ROOM_WAIT_MS 1000
+
+static const char KEY_CHARS[] = "123A456B789C*0#D";
 
 static const char *TAG = "dbg";
 
@@ -107,7 +112,14 @@ static const char *cmd_play(char *args) {
     *last = '\0';
     trim_end(args);
   }
-  return player_result(player_play(args, (uint32_t)start_ms));
+  uint32_t id;
+  esp_err_t err = player_play(args, (uint32_t)start_ms, &id);
+  if (err == ESP_OK) {
+    // The number the track's events will carry (`EVENT id=` in the UI
+    // task's log). The track can start, or fail, before this line is out.
+    ESP_LOGI(TAG, "play id=%" PRIu32, id);
+  }
+  return player_result(err);
 }
 
 static const char *cmd_vol(char *args) {
@@ -150,7 +162,7 @@ static const char *cmd_key(char *args, bool held) {
     return "expected one key";
   }
   char key = (char)toupper((unsigned char)args[0]);
-  if (!strchr("123A456B789C*0#D", key)) {
+  if (!strchr(KEY_CHARS, key)) {
     return "no such key";
   }
   if (!post_key(KEY_PRESS, key) || (held && !post_key(KEY_LONG, key)) ||
@@ -158,6 +170,61 @@ static const char *cmd_key(char *args, bool held) {
     return "key queue full";
   }
   return NULL;
+}
+
+// One event of a `hold`. Waits for room: the queue holds 16 and a hold can
+// be 2003 events, so the UI task has to take them as they come. False if
+// there was still no room after HOLD_ROOM_WAIT_MS.
+static bool post_held(key_event_type_t type, char key, uint32_t *posted) {
+  const key_event_t event = {.type = type, .key = key};
+  if (xQueueSend(s_key_events, &event, pdMS_TO_TICKS(HOLD_ROOM_WAIT_MS)) !=
+      pdTRUE) {
+    return false;
+  }
+  (*posted)++;
+  return true;
+}
+
+// `hold <char> <repeats>`: what is posted, and how, is in debug_console.h.
+static const char *cmd_hold(char *args) {
+  char *count = args;
+  while (*count != '\0' && *count != ' ' && *count != '\t') {
+    count++;
+  }
+  if (*count != '\0') {
+    *count++ = '\0';
+    count = skip_spaces(count);
+  }
+  if (args[0] == '\0' || args[1] != '\0') {
+    return "expected one key and a repeat count";
+  }
+  char key = (char)toupper((unsigned char)args[0]);
+  if (!strchr(KEY_CHARS, key)) {
+    return "no such key";
+  }
+  if (*count == '\0') {
+    return "no repeat count";
+  }
+  long long repeats;
+  if (!all_digits(count) || !parse_number(count, &repeats) ||
+      repeats > HOLD_MAX_REPEATS) {
+    return "expected a repeat count, 0 to 2000";
+  }
+
+  uint32_t wanted = (uint32_t)repeats + 3;
+  uint32_t posted = 0;
+  bool room = post_held(KEY_PRESS, key, &posted) &&
+              post_held(KEY_LONG, key, &posted);
+  for (long long i = 0; room && i < repeats; i++) {
+    room = post_held(KEY_REPEAT, key, &posted);
+  }
+  // The release is tried even when the queue stopped taking events, so that
+  // the UI task is not left believing the key is still down.
+  post_held(KEY_RELEASE, key, &posted);
+
+  ESP_LOGI(TAG, "hold key=%c repeats=%lld posted=%" PRIu32 " dropped=%" PRIu32,
+           key, repeats, posted, wanted - posted);
+  return posted == wanted ? NULL : "key queue full: events were dropped";
 }
 
 static const char *cmd_stat(void) {
@@ -408,6 +475,8 @@ static void run_line(const char *line) {
     why = cmd_key(args, false);
   } else if (strcmp(word, "long") == 0) {
     why = cmd_key(args, true);
+  } else if (strcmp(word, "hold") == 0) {
+    why = cmd_hold(args);
   } else if (strcmp(word, "stall") == 0) {
     why = cmd_stall(args);
   } else if (strcmp(word, "stat") == 0 && no_args) {

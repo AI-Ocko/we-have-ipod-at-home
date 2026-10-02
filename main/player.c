@@ -59,7 +59,8 @@
 // Who owns what
 // -------------
 // Decoder task only: `s_dec` (the track, file, decoder handle, both decoder
-//   buffers), the generation counter, posting STARTED, ENDED and ERROR.
+//   buffers, its play number), the generation counter, posting STARTED, ENDED
+//   and ERROR.
 // Output task only: `out_t` (its state, the gain, the frame counts), the two
 //   block buffers `s_out_raw` and `s_out_pcm`, every audio_out_* call,
 //   posting POSITION, emptying the ring.
@@ -74,9 +75,11 @@
 // Messages
 // --------
 // Callers ──► decoder task (`s_cmd_q`, 8 deep, never waited on by the sender):
-//   PLAY(path, start)
+//   PLAY(path, start, play number)
 //                stop what is playing, open the file, start decoding; a
-//                start other than 0 is a seek to there before anything sounds
+//                start other than 0 is a seek to there before anything sounds.
+//                The number was given out by player_play() (see "Play
+//                numbers")
 //   PAUSE        playing -> paused; otherwise ignored
 //   RESUME       paused -> playing; otherwise ignored
 //   STOP         stop what is playing, go idle
@@ -95,7 +98,7 @@
 //                to look anyway.
 //
 // Decoder task ──► output task (`s_out_q`, 8 deep):
-//   START(gen, rate, format, channels, paused, eos)
+//   START(gen, play number, rate, format, channels, paused, eos)
 //                a new stream is in the ring; play it (or hold it, if paused).
 //                "Stream" is what the output task plays between two STARTs: a
 //                track from its start, or from the place a seek went to.
@@ -230,6 +233,31 @@
 // refer to, so a late report about a stream that has since been replaced is
 // not mistaken for news of the current one.
 //
+// Play numbers
+// ------------
+// Every event says which `play` it is about, so that whoever reads them can
+// tell the end of a track it has since replaced from the end of the one it is
+// waiting for. player_play() takes the next number from a counter (an atomic
+// add: it is called from more than one task), hands it to its caller and
+// puts it in the PLAY message. That happens before the message is queued, so
+// the caller knows the number before any event can carry it.
+//
+// The number then travels with messages that existed already. The decoder
+// task keeps it with the track from PLAY on (`play_id` in dec_t) and stamps
+// STARTED, ENDED and ERROR with it. It passes it to the output task in every
+// START, which keeps it with the stream and stamps POSITION with it. Neither
+// task ever holds a number other than that of the track it is working on:
+// the decoder task's changes only in dec_play(), after the old track has
+// been flushed, and the output task posts nothing between a FLUSH and the
+// next START.
+//
+// It is not the generation and cannot be derived from it. A generation names
+// a stream and is private to the two tasks: a seek makes a new one, and the
+// decoder task hands them out itself. A play number names a track, outlives
+// its seeks, and has to be known to the caller before the decoder task has
+// seen the command, so it is handed out by the caller's task. One counter
+// could not serve both.
+//
 // Not in the audio loops: logging, allocation (buffers are made at start-up;
 // the decoder's output buffer is replaced only if a block does not fit),
 // floating point, per-sample division or calls. A seek allocates nothing
@@ -311,6 +339,7 @@ typedef struct {
   cmd_type_t type;
   char *path;        // PLAY: heap copy, owned by whoever holds the message
   uint32_t start_ms; // PLAY: where in the track to start
+  uint32_t play_id;  // PLAY: the number its events will carry
   int32_t ms;        // SEEK: distance; STALL: how long
 } cmd_t;
 
@@ -327,6 +356,7 @@ typedef struct {
   omsg_type_t type;
   uint32_t gen;
   // OMSG_START only:
+  uint32_t play_id; // of the track the stream belongs to, for POSITION
   uint32_t rate;
   pcm_format_t format;
   uint8_t channels;
@@ -355,6 +385,10 @@ static char *s_path; // the current track's path (heap); see s_path_lock
 
 // Writer: any task, in player_set_volume(). Read by the output task per block.
 static atomic_int s_volume = DEFAULT_VOLUME;
+
+// Writer: any task, in player_play(), by an atomic add. The number given to
+// the latest `play`; see "Play numbers".
+static atomic_uint s_play_counter;
 
 // Writer: any task, in the command functions: 1 after `pause`, 0 after
 // `play`, `resume` or `stop`. It exists so that the reported state follows a
@@ -491,6 +525,7 @@ typedef struct {
 
   // The stream, as START described it.
   uint32_t gen;
+  uint32_t play_id;
   uint32_t rate;
   pcm_format_t format;
   uint8_t channels;
@@ -628,6 +663,7 @@ static bool out_write(out_t *o, size_t frames) {
   if (o->position >= o->next_position_frames) {
     const player_event_t event = {
         .type = PLAYER_EVENT_POSITION,
+        .play_id = o->play_id,
         .position_ms = o->next_position_ms,
     };
     post_event(&event);
@@ -731,6 +767,7 @@ static void out_handle(out_t *o, const omsg_t *m) {
   switch (m->type) {
   case OMSG_START:
     o->gen = m->gen;
+    o->play_id = m->play_id;
     o->rate = m->rate;
     o->format = m->format;
     o->channels = m->channels;
@@ -838,6 +875,7 @@ typedef struct {
   bool jumped;      // it has been seeked in
   bool paused;
   uint32_t gen;
+  uint32_t play_id; // of the track: set by PLAY, kept until the next one
 
   // A seek that has been asked for and not yet made. Seeks that arrive
   // before it is made move the target; one jump serves them all.
@@ -922,7 +960,11 @@ static void dec_unload(void) {
 }
 
 static void dec_post_error(player_error_t error) {
-  const player_event_t event = {.type = PLAYER_EVENT_ERROR, .error = error};
+  const player_event_t event = {
+      .type = PLAYER_EVENT_ERROR,
+      .play_id = s_dec.play_id,
+      .error = error,
+  };
   post_event(&event);
 }
 
@@ -952,6 +994,7 @@ static void dec_report_end(int error) {
     atomic_store(&s_ended_expected, d->expected);
     const player_event_t event = {
         .type = PLAYER_EVENT_ENDED,
+        .play_id = d->play_id,
         .position_ms =
             (uint32_t)((uint64_t)atomic_load(&s_position) * 1000 / d->rate),
         .duration_ms = d->duration_ms,
@@ -976,6 +1019,7 @@ static void dec_start_output(bool eos) {
     d->announced = true;
     const player_event_t event = {
         .type = PLAYER_EVENT_STARTED,
+        .play_id = d->play_id,
         .duration_ms = d->duration_ms,
         .sample_rate = d->rate,
         .bits = d->bits,
@@ -987,6 +1031,7 @@ static void dec_start_output(bool eos) {
   const omsg_t m = {
       .type = OMSG_START,
       .gen = d->gen,
+      .play_id = d->play_id,
       .rate = d->rate,
       .format = d->format,
       .channels = d->channels,
@@ -1211,9 +1256,12 @@ static int dec_open(const char *path) {
 }
 
 // The PLAY command. Takes ownership of `path`.
-static void dec_play(char *path, uint32_t start_ms) {
+static void dec_play(char *path, uint32_t start_ms, uint32_t play_id) {
   dec_t *d = &s_dec;
   dec_stop_track();
+  // The old track is flushed and will post nothing more: from here on every
+  // event is this track's.
+  d->play_id = play_id;
 
   xSemaphoreTake(s_path_lock, portMAX_DELAY);
   free(s_path);
@@ -1533,7 +1581,7 @@ static void dec_handle(cmd_t *c) {
   dec_t *d = &s_dec;
   switch (c->type) {
   case CMD_PLAY:
-    dec_play(c->path, c->start_ms);
+    dec_play(c->path, c->start_ms, c->play_id);
     break;
 
   case CMD_PAUSE:
@@ -1666,7 +1714,10 @@ static esp_err_t send_command(const cmd_t *c, int pause_wanted) {
   return ESP_OK;
 }
 
-esp_err_t player_play(const char *path, uint32_t start_ms) {
+esp_err_t player_play(const char *path, uint32_t start_ms, uint32_t *play_id) {
+  if (play_id) {
+    *play_id = 0; // unless the command is queued
+  }
   if (!path || path[0] == '\0') {
     return ESP_ERR_INVALID_ARG;
   }
@@ -1674,9 +1725,24 @@ esp_err_t player_play(const char *path, uint32_t start_ms) {
   if (!c.path) {
     return ESP_ERR_NO_MEM;
   }
+  // The next number: one atomic add, so two tasks calling at once still get
+  // different ones. 0 is skipped if the counter ever comes round to it.
+  c.play_id = atomic_fetch_add(&s_play_counter, 1) + 1;
+  if (c.play_id == 0) {
+    c.play_id = atomic_fetch_add(&s_play_counter, 1) + 1;
+  }
+  // The caller is told before the command is queued: the decoder task can
+  // post the track's first event before send_command() has returned.
+  if (play_id) {
+    *play_id = c.play_id;
+  }
   esp_err_t err = send_command(&c, 0);
   if (err != ESP_OK) {
+    // Never queued, so no event will carry the number. It is not reused.
     free(c.path);
+    if (play_id) {
+      *play_id = 0;
+    }
   }
   return err;
 }
