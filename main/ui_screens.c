@@ -22,8 +22,12 @@
 //                                            a marquee in 15 columns
 //   an empty list       |Artists         |   the name alone
 //                       |(empty)         |
-//   Now Playing         |Hey Mama - Kanye|   the title, a marquee in 16
+//   Now Playing         |Hey Mama - Kanye|   "Title - Artist", a marquee
 //                       |> 0:12/5:05     |   symbol, space, m:ss/m:ss
+//   ... a notice        |Hey Mama - Kanye|
+//                       |Can't play      |   or "File missing", for 1.5 s
+//   ... no track        |Nothing playing |
+//                       |                |
 //   the volume bar      |Vol#####+---- 11|   replaces the bottom row of any
 //                                            screen but the key test
 //   About               |1028 tracks     |
@@ -69,8 +73,12 @@ static uint32_t ms_since(int64_t since_us, int64_t now_us) {
 }
 
 // Milliseconds until `until_us`, rounded up: at least 1 for a time still to
-// come, so that whoever sleeps this long wakes at or after it.
+// come, so that whoever sleeps this long wakes at or after it; 0 for one
+// that has come.
 static uint32_t ms_until(int64_t until_us, int64_t now_us) {
+  if (until_us <= now_us) {
+    return 0;
+  }
   return (uint32_t)((until_us - now_us + 999) / 1000);
 }
 
@@ -126,24 +134,36 @@ static void render_about(const ui_t *ui, screen_t *screen) {
 
 static void render_now_playing(const ui_t *ui, const player_status_t *player,
                                int64_t now_us, screen_t *screen) {
-  marquee_window(ui->title, SCREEN_COLS, ms_since(ui->title_since_us, now_us),
-                 screen->cells[0]);
-  if (ui->failed) {
-    screen_set_row(screen, 1, "Can't play");
+  const ui_play_t *play = &ui->play;
+  if (play->path[0] == '\0') {
+    screen_set_row(screen, 0, "Nothing playing");
+    screen_set_row(screen, 1, "");
     return;
   }
+  marquee_window(play->title, SCREEN_COLS,
+                 ms_since(play->title_since_us, now_us), screen->cells[0]);
+  if (play->notice_until_us != 0) {
+    screen_set_row(screen, 1, play->notice == UI_NOTICE_FILE_MISSING
+                                  ? "File missing"
+                                  : "Can't play");
+    return;
+  }
+  // The symbol, a space, the time. Columns 12 to 15 are stage 6's (shuffle
+  // and loop). Minutes are not turned into hours: 75 minutes is "75:00".
   char text[2 * SCREEN_COLS];
-  uint32_t elapsed = ui->elapsed_ms / 1000;
-  uint32_t total = ui->duration_ms / 1000;
-  // Minutes are not turned into hours: 75 minutes is "75:00".
+  uint32_t elapsed = play->elapsed_ms / 1000;
+  uint32_t total = play->duration_ms / 1000;
   snprintf(text, sizeof(text), "  %" PRIu32 ":%02" PRIu32 "/%" PRIu32
            ":%02" PRIu32, elapsed / 60, elapsed % 60, total / 60, total % 60);
   screen_set_row(screen, 1, text);
-  if (player->state == PLAYER_STATE_PLAYING) {
-    screen->cells[1][0] = UI_GLYPH_PLAY;
-  } else if (player->state == PLAYER_STATE_PAUSED) {
-    screen->cells[1][0] = UI_GLYPH_PAUSE;
-  }
+  // The play symbol while the track is the player's and not paused; the
+  // pause symbol when it is paused, and when it is stopped and remembered
+  // (D plays it from 0:00). "The player's" is what the events have said
+  // (play->active), not the player's state: that changes a moment after a
+  // `play` or a `stop` with no event to redraw on. Its pause flag is set as
+  // the pause is asked for, so that much of it can be used.
+  bool playing = play->active && player->state != PLAYER_STATE_PAUSED;
+  screen->cells[1][0] = playing ? UI_GLYPH_PLAY : UI_GLYPH_PAUSE;
 }
 
 static void render_volume_bar(int volume, screen_t *screen) {
@@ -191,19 +211,23 @@ void ui_render(const ui_t *ui, const player_status_t *player, int64_t now_us,
 }
 
 uint32_t ui_next_change_ms(const ui_t *ui, int64_t now_us) {
-  if (ui->mode == UI_MODE_KEYTEST) {
-    return UINT32_MAX;
-  }
   uint32_t next = UINT32_MAX;
   uint32_t ms;
   bool bar = volume_bar_on(ui, now_us);
   if (bar) {
     next = ms_until(ui->volume_until_us, now_us);
   }
-  if (ui->mode == UI_MODE_NOW_PLAYING) {
-    ms = marquee_next_change_ms(ui->title, SCREEN_COLS,
-                                ms_since(ui->title_since_us, now_us));
+  if (ui->play.notice_until_us != 0) {
+    // Whatever screen is up: when it runs out the next track starts.
+    ms = ms_until(ui->play.notice_until_us, now_us);
     next = ms < next ? ms : next;
+  }
+  if (ui->mode == UI_MODE_NOW_PLAYING) {
+    if (ui->play.path[0] != '\0') {
+      ms = marquee_next_change_ms(ui->play.title, SCREEN_COLS,
+                                  ms_since(ui->play.title_since_us, now_us));
+      next = ms < next ? ms : next;
+    }
   } else if (ui_list_on_show(ui) && !bar && ui->list_menu.count != 0) {
     // Under the bar the item is not seen, so its steps are not worth waking
     // for; the bar's end is, and the marquee is then drawn where it has got

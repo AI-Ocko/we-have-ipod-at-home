@@ -491,7 +491,8 @@ static void run_line(const char *line) {
   } else if (strcmp(word, "resume") == 0 && no_args) {
     why = player_result(player_resume());
   } else if (strcmp(word, "stop") == 0 && no_args) {
-    why = player_result(player_stop());
+    ui_stop(); // the UI stops the player, and knows that it has
+    why = NULL;
   } else if (strcmp(word, "vol") == 0) {
     why = cmd_vol(args);
   } else if (strcmp(word, "seek") == 0) {

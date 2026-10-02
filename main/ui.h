@@ -29,6 +29,13 @@ esp_err_t ui_start(ui_queues_t *queues);
 // attempt fails, once with false when a later one works.
 void ui_card_waiting(bool waiting);
 
+// Stop playback, as a user of the player would want it stopped: the player
+// stops, the track stays on Now Playing as the one D starts again, and the
+// rest of its list does not follow. For the console's `stop`. (player_stop
+// alone leaves the UI believing the track is still playing: the player
+// reports no event for a stop.) Returns at once; from any task.
+void ui_stop(void);
+
 // The LCD's user-defined characters, as the codes that go in a screen cell.
 // The play triangle is the key test screen's glyph, so that screen needs no
 // character of its own. Five of the eight are used; stage 6 has three more

@@ -12,7 +12,10 @@
 //
 //   play <path> [start_ms]   player_play. Also logs `play id=<n>`: the play
 //                            number the track's events will carry.
-//   pause | resume | stop    player_pause / player_resume / player_stop
+//   pause | resume           player_pause / player_resume
+//   stop                     ui_stop: the UI task stops the player, keeps the
+//                            track as the one D starts again, and does not
+//                            go on to the next track of its list
 //   vol <n>                  player_set_volume (any integer; the player clamps)
 //   seek <signed ms>         player_seek_rel
 //   key <char>               a press and a release of that key

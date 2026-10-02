@@ -13,14 +13,10 @@
 #include "player.h"
 #include "player_status.h"
 #include "screen.h"
-#include "storage.h"
-#include "tracklist.h"
-#include "translit.h"
 #include "ui_state.h"
 #include <inttypes.h>
 #include <stdatomic.h>
 #include <stdbool.h>
-#include <stdio.h>
 #include <string.h>
 
 // Design notes
@@ -33,25 +29,31 @@
 // on all of them at once. One pass of its loop is:
 //
 //   1. read the clock, once: it decides what is drawn and how long to sleep
-//   2. if the list on show has moved, copy its texts out of the index
+//   2. act on a time that has come: a "Can't play" notice that has had its
+//      1.5 s gives way to the next track (ui_play_on_time)
+//   3. if the list on show has moved, copy its texts out of the index
 //      (ui_fill_list: the one place a redraw takes the index, at most once)
-//   3. draw the state into a screen_t (ui_render, in ui_screens.c) and send
+//   4. draw the state into a screen_t (ui_render, in ui_screens.c) and send
 //      the LCD only what differs from the screen it has
-//   4. sleep until an event arrives or the screen is due to change by itself
-//      (ui_next_change_ms): a marquee step or the volume bar running out.
-//      If nothing is due, sleep for ever
-//   5. take every event that is waiting, in the order they were posted, and
+//   5. sleep until an event arrives or the next thing is due by itself
+//      (ui_next_change_ms): a marquee step, the volume bar or a notice
+//      running out. If nothing is due, sleep for ever
+//   6. take every event that is waiting, in the order they were posted, and
 //      apply each to the state; then go round. So sixteen key events that
 //      arrived during one LCD transfer cost one redraw, not sixteen
 //
 // Nothing is polled. A pass happens because an event arrived or because the
-// time step 4 slept for has run out, and then the screen is different. The
-// loop allocates nothing; all its state is one static ui_t.
+// time step 5 slept for has run out; in the second case there is always
+// something to draw or to do. The loop allocates nothing; all its state is
+// one static ui_t.
 //
-// State changes (this file) and drawing (ui_screens.c) are kept apart: an
-// event handler only changes ui_t, and ui_render is a function of ui_t, the
-// player's status and the time. "Draw only what changed" then needs no
-// thought: whatever the handlers did, one screen is built and compared.
+// The work is in three files. This one has the loop, the keys and the
+// menus. ui_play.c has the track that is playing and the list it came from:
+// what the player's events do. ui_screens.c draws. State changes and
+// drawing are kept apart: an event handler only changes ui_t, and ui_render
+// is a function of ui_t, the player's status and the time. "Draw only what
+// changed" then needs no thought: whatever the handlers did, one screen is
+// built and compared with the last one sent.
 //
 // THE SCREENS
 //
@@ -66,13 +68,23 @@
 //                the count do. These are not modes: they come and go with
 //                what the card and the library report, and the list keys do
 //                nothing while one is up.
-//   NOW_PLAYING  the track's title and its time. (Still the temporary
-//                playing screen of the earlier stages.)
+//   NOW_PLAYING  the current track's title and artist, the play or pause
+//                symbol and the time; "Nothing playing" if there is no
+//                track. Its state is ui_t.play, which is kept up whatever
+//                screen is up. Choosing a track in a list comes here.
 //   KEYTEST      the key test screen: keytest_*.
 //   ABOUT        two facts: about_tracks and the firmware's build date.
 //
-// The volume bar is not a screen: it replaces the bottom row of whatever is
-// up (except the key test) until volume_until_us.
+// OVERLAYS
+//
+// Two things take over a bottom row for 1.5 s, and neither is a screen. The
+// volume bar replaces the bottom row of whatever is up (except the key
+// test) until volume_until_us. A notice ("Can't play", "File missing")
+// replaces Now Playing's bottom row until play.notice_until_us, and when it
+// goes the next track is started; the bar, the newer of the two, is drawn
+// over it. Each is a time in ui_t: ui_render compares it with the clock,
+// and ui_next_change_ms makes it one of the moments the loop sleeps until,
+// along with the marquee's next step. There is one sleep and no timer.
 //
 // KEYS
 //
@@ -82,7 +94,9 @@
 //
 //   A / B   volume up / down, on press and on repeat; shows the bar for
 //           1.5 s, also when the volume was already at its end
-//   D       pause if playing, resume if paused; otherwise nothing
+//   D       pause if playing, resume if paused; if nothing is loaded and a
+//           track is remembered (its list ended, or a scan stopped it),
+//           play that track again from its beginning; otherwise nothing
 //   C       Now Playing if the menus (or About) are up; the menus if Now
 //           Playing is, where the user left them
 //   #       nothing yet
@@ -91,7 +105,8 @@
 //           the ends, a repeat stops there); 5 or 6 opens or selects; 4 or
 //           `*` goes back; 1 / 3 jump to the previous / next first letter
 //           where the list is A to Z, and move by 10 where it is not
-//   Now Playing   `*` goes to the menus
+//   Now Playing   5 does what D does; `*` goes to the menus; 1, 3, 4, 6
+//           do nothing yet
 //   About   any key that is not a global one leaves it, to Settings
 //
 // Only presses act (and repeats, where it says so). A release does nothing,
@@ -103,18 +118,19 @@
 // (library_task_put) inside one function each time, never across a wait:
 //
 //   - a key that needs it takes it once: select (browse_select, and the
-//     path of a track to play), a letter jump (one take around the whole
-//     binary search), opening About (the track count). Moving the cursor
-//     and going back need no index at all: a list's length is already in
-//     its menu_t.
+//     path, title and artist of a track to play), a letter jump (one take
+//     around the whole binary search), opening About (the track count).
+//     Moving the cursor and going back need no index at all: a list's
+//     length is already in its menu_t.
 //   - a redraw takes it once, and only if the list on show has moved since
 //     its texts were copied: ui_fill_list counts the list afresh and copies
 //     the list's name and the item under the cursor.
-//   - a new track takes it once, to find its title and artist.
+//   - a track that ends takes it once, for the next track of its list; a
+//     new index takes it once, to find the current track in it again.
 //
 // What is kept between passes is copies and numbers: list_name, list_item,
-// list_menu and title. A marquee step, a clock tick or the volume bar draws
-// from those and never touches the index.
+// list_menu, and play.path and play.title. A marquee step, a clock tick,
+// the volume bar or a notice draws from those and never touches the index.
 //
 // The numbers in `browse` belong to one index. ui_index_get therefore hands
 // out an index only when the UI has caught up with the library's latest
@@ -141,9 +157,6 @@
 #define UI_LOG_EVERY_REPEAT 0
 
 static const char *TAG = "dap";
-// The player's events are logged here, by the task that reads them, under
-// the player's name: the audio tasks themselves log nothing while they run.
-static const char *PLAYER_TAG = "player";
 
 static QueueHandle_t s_key_events;
 static QueueHandle_t s_player_events;
@@ -154,6 +167,7 @@ static QueueSetHandle_t s_ui_events; // all of the above
 static TaskHandle_t s_task;
 static atomic_uint s_passes;
 static atomic_uint s_lcd_updates;
+static atomic_bool s_stop_wanted; // ui_stop was called
 
 // What the task that waits for the card tells the UI task (ui_card_waiting).
 // The UI task owns the LCD, so the task that waits for the card cannot draw
@@ -163,28 +177,12 @@ typedef enum {
   CARD_EVENT_MOUNTED, // the wait is over
 } card_event_t;
 
-static const char *error_name(player_error_t error) {
-  switch (error) {
-  case PLAYER_ERROR_NOT_FOUND:
-    return "not_found";
-  case PLAYER_ERROR_UNSUPPORTED:
-    return "unsupported";
-  case PLAYER_ERROR_DECODE:
-    return "decode";
-  case PLAYER_ERROR_IO:
-    return "io";
-  case PLAYER_ERROR_NO_MEM:
-    return "no_mem";
-  }
-  return "decode";
-}
-
 // --- the index ---------------------------------------------------------------
 
 // The index, if there is one and it is the one the UI's numbers belong to
 // (see THE INDEX). NULL otherwise. Whoever gets one calls library_task_put
 // before it returns.
-static const library_t *ui_index_get(const ui_t *ui) {
+const library_t *ui_index_get(const ui_t *ui) {
   // A status still in the queue is newer than what `ui` holds. Looking at it
   // does not take it: it is handled in its turn, later in this same pass.
   library_status_t latest;
@@ -252,51 +250,9 @@ static void ui_jump(ui_t *ui, int direction) {
   library_task_put();
 }
 
-// Put the title and artist of the track last started on the top row, if the
-// library has that track. Reads no file: one search of the index, and the
-// index is held only while the two strings are copied out of it.
-//
-// When there is no index (none loaded yet, a scan is running) or the track
-// is not in it (a file added since the last scan), the title is left as it
-// is: the file name. Nothing waits or tries again on a timer; the UI task
-// calls this again when the library publishes a new index.
-//
-// A track with no tags is in the index under the fallbacks, so it shows as
-// "<file name> - Unknown Artist".
-static void ui_title_from_library(ui_t *ui) {
-  // The index has paths relative to the card: "music/a.flac".
-  static const char root[] = STORAGE_MOUNT_POINT "/";
-  const size_t root_len = sizeof(root) - 1;
-  if (strncmp(ui->path, root, root_len) != 0) {
-    return; // nothing has started yet
-  }
-  const library_t *lib = ui_index_get(ui);
-  if (lib == NULL) {
-    return;
-  }
-  char text[UI_TITLE_MAX] = "";
-  uint32_t track;
-  library_track_t info;
-  if (library_find_path(lib, ui->path + root_len, &track) &&
-      library_track(lib, track, &info) && info.title[0] != '\0') {
-    if (info.artist[0] != '\0') {
-      snprintf(text, sizeof(text), "%s - %s", info.title, info.artist);
-    } else {
-      snprintf(text, sizeof(text), "%s", info.title);
-    }
-  }
-  library_task_put(); // `info` and its strings are dead from here
-
-  if (text[0] != '\0' && strcmp(text, ui->title) != 0) {
-    // Different words on the row: they are read from the beginning.
-    strcpy(ui->title, text);
-    ui->title_since_us = esp_timer_get_time();
-  }
-}
-
 static void ui_show_now_playing(ui_t *ui, int64_t now_us) {
   ui->mode = UI_MODE_NOW_PLAYING;
-  ui->title_since_us = now_us; // the title is read from its beginning
+  ui->play.title_since_us = now_us; // the title is read from its beginning
 }
 
 static void ui_show_menus(ui_t *ui) {
@@ -308,15 +264,10 @@ static void ui_show_menus(ui_t *ui) {
 // 5 or 6 in a list: open or act on the item under the cursor. The index is
 // taken once, for browse_select and for whatever the action needs from it.
 static void ui_select(ui_t *ui, char key, int64_t now_us) {
-  static char path[UI_PATH_MAX]; // the UI task's alone
-  static const char root[] = STORAGE_MOUNT_POINT "/";
-
   const library_t *lib = ui_index_get(ui); // NULL is an empty library
   browse_result_t result = browse_select(&ui->browse, lib);
   if (result.action == BROWSE_PLAY) {
-    memcpy(path, root, sizeof(root));
-    library_track_path(lib, tracklist_track(lib, result.list, result.index),
-                       path + sizeof(root) - 1, sizeof(path) - sizeof(root) + 1);
+    ui_play_choose(ui, lib, result.list, result.index, now_us);
   } else if (result.action == BROWSE_ABOUT) {
     ui->about_tracks = library_track_count(lib);
   }
@@ -329,7 +280,8 @@ static void ui_select(ui_t *ui, char key, int64_t now_us) {
   case BROWSE_ENTERED: // ui_on_list_key sees that the level changed
     break;
   case BROWSE_PLAY:
-    player_play(path, 0, NULL);
+    ui_play_start(ui);
+    ui_show_now_playing(ui, now_us);
     break;
   case BROWSE_NOW_PLAYING:
     ui_show_now_playing(ui, now_us);
@@ -468,12 +420,7 @@ static void ui_on_key(ui_t *ui, const key_event_t *event, int64_t now_us) {
     return;
   case 'D':
     if (press) {
-      player_get_status(&status);
-      if (status.state == PLAYER_STATE_PLAYING) {
-        player_pause();
-      } else if (status.state == PLAYER_STATE_PAUSED) {
-        player_resume();
-      }
+      ui_play_toggle(ui, now_us);
     }
     return;
   case 'C':
@@ -496,8 +443,11 @@ static void ui_on_key(ui_t *ui, const key_event_t *event, int64_t now_us) {
     }
     break;
   case UI_MODE_NOW_PLAYING:
+    // 1, 3, 4, 6 and # are stage 6's.
     if (press && event->key == '*') {
       ui_show_menus(ui);
+    } else if (press && event->key == '5') {
+      ui_play_toggle(ui, now_us);
     }
     break;
   case UI_MODE_ABOUT:
@@ -512,84 +462,30 @@ static void ui_on_key(ui_t *ui, const key_event_t *event, int64_t now_us) {
 
 // --- the player, the card and the library --------------------------------------
 
-static void ui_on_player_event(ui_t *ui, const player_event_t *event) {
-  // Which `play` the event is about. A line of its own, ahead of the event's
-  // line: the four below are a fixed format that scripts read.
-  static const char *const TYPE[] = {"started", "position", "ended", "error"};
-  ESP_LOGI(PLAYER_TAG, "EVENT id=%" PRIu32 " type=%s", event->play_id,
-           TYPE[event->type]);
-
-  switch (event->type) {
-  case PLAYER_EVENT_STARTED: {
-    player_get_path(ui->path, sizeof(ui->path));
-    ESP_LOGI(PLAYER_TAG,
-             "STARTED path=%s rate=%" PRIu32 " bits=%u ch=%u duration_ms=%"
-             PRIu32,
-             ui->path, event->sample_rate, event->bits, event->channels,
-             event->duration_ms);
-    const char *slash = strrchr(ui->path, '/');
-    translit_title(NULL, slash ? slash + 1 : ui->path, ui->title,
-                   sizeof(ui->title));
-    ui_title_from_library(ui);
-    // A new track: its title is read from the beginning. Apart from the
-    // library supplying the title late, nothing else (pause, volume, the
-    // clock) restarts the marquee.
-    ui->title_since_us = esp_timer_get_time();
-    ui->elapsed_ms = 0;
-    ui->duration_ms = event->duration_ms;
-    ui->failed = false;
-    break;
-  }
-  case PLAYER_EVENT_POSITION:
-    ESP_LOGI(PLAYER_TAG, "POSITION ms=%" PRIu32, event->position_ms);
-    ui->elapsed_ms = event->position_ms;
-    break;
-
-  case PLAYER_EVENT_ENDED: {
-    // The event has no room for frame counts; the player keeps those of the
-    // last track that ended.
-    player_status_t status;
-    player_get_status(&status);
-    ESP_LOGI(PLAYER_TAG, "ENDED frames=%" PRIu32 " expected=%" PRIu32,
-             status.ended_frames, status.ended_expected);
-    ui->elapsed_ms = event->position_ms;
-    break;
-  }
-  case PLAYER_EVENT_ERROR:
-    ESP_LOGE(PLAYER_TAG, "ERROR reason=%s", error_name(event->error));
-    ui->failed = true;
-    break;
-  }
-
-  // The output task cannot log an underrun itself. It counts them, and the
-  // count is looked at here, twice a second while a track plays.
-  player_status_t status;
-  player_get_status(&status);
-  if (status.underruns != ui->underruns) {
-    ESP_LOGW(PLAYER_TAG, "UNDERRUN count=%" PRIu32 " (the buffer ran dry)",
-             status.underruns);
-    ui->underruns = status.underruns;
-  }
-}
-
-static void ui_on_library_status(ui_t *ui, const library_status_t *status) {
+static void ui_on_library_status(ui_t *ui, const library_status_t *status,
+                                 int64_t now_us) {
   bool scan_began = status->scanning && !ui->scanning;
   ui->scanning = status->scanning;
   ui->scan_tracks = status->tracks;
-  if (scan_began && ui->mode != UI_MODE_KEYTEST) {
+  if (scan_began) {
+    // The scan wants the card to itself. The library task stops the
+    // player, but it cannot stop a track this task is about to start.
+    ui_play_stop(ui);
     // The scan is the thing to look at, whatever was up. (The key test is
     // left only by its own key.)
-    ui->mode = UI_MODE_MENU;
+    if (ui->mode != UI_MODE_KEYTEST) {
+      ui->mode = UI_MODE_MENU;
+    }
   }
   if (!status->scanning && status->generation != ui->generation) {
     // A new index (the first load, or a scan that has finished). The numbers
     // in the menus belonged to the old one: back to the main menu. The track
-    // on show may have started while there was no index, or its tags may
-    // have changed, so look it up again.
+    // on Now Playing may have started while there was no index, its tags may
+    // have changed, or it may be gone: look it up again.
     ui->generation = status->generation;
     browse_library_changed(&ui->browse);
     ui->list_restart = true;
-    ui_title_from_library(ui);
+    ui_play_library_changed(ui, now_us);
   }
   // With or without a new index, what the lists hold may have changed.
   ui->list_dirty = true;
@@ -605,20 +501,18 @@ static void ui_take(ui_t *ui, QueueSetMemberHandle_t ready, int64_t now_us) {
   } else if (ready == s_player_events) {
     player_event_t event;
     if (xQueueReceive(s_player_events, &event, 0) == pdTRUE) {
-      ui_on_player_event(ui, &event);
+      ui_play_on_event(ui, &event, now_us);
     }
   } else if (ready == s_card_events) {
     card_event_t event;
     if (xQueueReceive(s_card_events, &event, 0) == pdTRUE) {
       ui->no_card = (event == CARD_EVENT_WAITING);
-      // A `play` that failed for want of a card says nothing about now.
-      ui->failed = false;
       ui->list_dirty = true;
     }
   } else if (ready == s_library_status) {
     library_status_t status;
     if (xQueueReceive(s_library_status, &status, 0) == pdTRUE) {
-      ui_on_library_status(ui, &status);
+      ui_on_library_status(ui, &status, now_us);
     }
   }
 }
@@ -648,6 +542,7 @@ static void ui_task(void *arg) {
   for (;;) {
     atomic_fetch_add(&s_passes, 1);
     int64_t now_us = esp_timer_get_time();
+    ui_play_on_time(&ui, now_us);
     if (ui.list_dirty && ui_list_on_show(&ui)) {
       ui_fill_list(&ui, now_us);
     }
@@ -664,18 +559,23 @@ static void ui_task(void *arg) {
       shown = wanted;
       shown_ok = (lcd_show(&shown) == ESP_OK);
       debug_console_note_screen(&shown);
-      atomic_fetch_add(&s_lcd_updates, 1);
+      if (shown_ok) {
+        atomic_fetch_add(&s_lcd_updates, 1);
+      }
     }
 
     QueueSetMemberHandle_t ready = xQueueSelectFromSet(
         s_ui_events, ticks_until(ui_next_change_ms(&ui, now_us)));
     // Everything that is waiting, in the order it was posted, before the
-    // screen is drawn once. If nothing was (the wait ran out), the screen is
-    // due a change by itself and the next pass draws it.
+    // screen is drawn once. If nothing was (the wait ran out), something is
+    // due by itself and the next pass does it.
     now_us = esp_timer_get_time();
     while (ready != NULL) {
       ui_take(&ui, ready, now_us);
       ready = xQueueSelectFromSet(s_ui_events, 0);
+    }
+    if (atomic_exchange(&s_stop_wanted, false)) {
+      ui_play_stop(&ui);
     }
   }
 }
@@ -732,4 +632,12 @@ void ui_get_stats(ui_stats_t *out) {
   out->stack_free = s_task ? uxTaskGetStackHighWaterMark(s_task) : 0;
   out->passes = atomic_load(&s_passes);
   out->lcd_updates = atomic_load(&s_lcd_updates);
+}
+
+void ui_stop(void) {
+  atomic_store(&s_stop_wanted, true);
+  // Wake the task: a key event with no key is one it takes and ignores. If
+  // the queue is full the task is awake already and will see the flag.
+  const key_event_t nothing = {.type = KEY_RELEASE, .key = '\0'};
+  xQueueSend(s_key_events, &nothing, 0);
 }
