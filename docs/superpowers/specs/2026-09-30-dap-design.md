@@ -145,20 +145,29 @@ main/
   app_main.c        start-up order, task creation
   pins.h            every GPIO number
   player.c/.h       decoder task + output task, command/event queues
+  debug_console.c/.h  serial commands for driving and inspecting the player
+  library_task.c/.h load or scan the index at boot; the scan task
   ui.c/.h           UI task: screen state machine, glue to queue and settings
   settings.c/.h     NVS-backed settings and resume state
 components/
   dap_core/         pure C, no ESP-IDF includes; builds on the host too
-    tags.c/.h         FLAC and ID3 tag readers
     translit.c/.h     UTF-8 to LCD character conversion
+    screen.c/.h       in-memory 16x2 frame; diff to the fewest LCD writes
+    marquee.c/.h      which part of a long text is visible at a given time
+    keys.c/.h         raw keypad scans to key events (debounce, long, repeat)
+    keytest.c/.h      contents of the keypad test screen
+    pcm.c/.h          conversion to 32-bit stereo, volume table, gain ramps
+    flac_header.c/.h  a FLAC file's stream format, length and audio offset
+    id3.c/.h          size of an ID3v2 tag
+    mp3_xing.c/.h     an MP3's length from its Xing/Info header
+    tags.c/.h         title, artist, album and length of one file
     library.c/.h      index build, save, load, query
     play_queue.c/.h   track order, shuffle, loop, next/previous rules
     playlists.c/.h    M3U read/write and edit operations
     textentry.c/.h    multi-tap text input state machine
     menu.c/.h         list navigation model (cursor, scrolling, letter jump)
-    screen.c/.h       in-memory 16x2 frame; diff to the fewest LCD writes
-    keys.c/.h         raw keypad scans to key events (debounce, long, repeat)
-    keytest.c/.h      contents of the keypad test screen
+  dap_fs/           POSIX directory access; builds on the host too
+    libscan.c/.h      walk the card, read tags, feed the index builder
   dap_hw/           ESP-IDF dependent drivers
     storage.c/.h      SD mount/unmount and retry
     audio_out.c/.h    I2S setup, reconfiguration, clean stop
@@ -496,7 +505,12 @@ Artists    14/87        Kid A       3/10
 >Radiohead              >The National A>
 ```
 
-Now Playing: top line scrolls "Title - Artist"; bottom line shows play/pause
+Long text moves as a marquee: it rests for 1.5 seconds with its start at the
+left edge, then moves right to left one character every 350 ms, with a gap of
+three spaces before the start comes round again, and rests again each time it
+does. Text that fits does not move.
+
+Now Playing: top line shows "Title - Artist" as a marquee; bottom line shows play/pause
 symbol, elapsed/total time, shuffle and loop indicators. A volume change
 replaces the bottom line with a bar for 1.5 seconds.
 
