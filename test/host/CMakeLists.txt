@@ -37,6 +37,7 @@ add_library(dap_core STATIC
   ${CORE_DIR}/mp3_xing.c
   ${CORE_DIR}/marquee.c
   ${CORE_DIR}/tags.c
+  ${CORE_DIR}/library.c
 )
 target_include_directories(dap_core PUBLIC ${CORE_DIR})
 
@@ -58,6 +59,7 @@ dap_test(test_id3)
 dap_test(test_mp3_xing)
 dap_test(test_marquee)
 dap_test(test_tags)
+dap_test(test_library)
 # The FLAC files made by tools/make_test_audio.sh.
 target_compile_definitions(test_flac_header PRIVATE
   FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures")
@@ -67,3 +69,12 @@ target_compile_definitions(test_tags PRIVATE
   FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/tags")
 # Its tests count the fread and fseek calls that tags_read makes.
 target_link_options(test_tags PRIVATE -Wl,--wrap=fread -Wl,--wrap=fseek)
+# The same tests against a build of the index whose sort never takes its
+# quicksort stage. That stage normally sorts everything and the heapsort
+# behind it is reached only on a hostile ordering, so without this the
+# fallback would ship untested.
+add_executable(test_library_heapsort test_library.c ${CORE_DIR}/library.c)
+target_compile_definitions(test_library_heapsort PRIVATE
+  LIBRARY_SORT_QUICK_BUDGET=0)
+target_link_libraries(test_library_heapsort PRIVATE dap_core unity)
+add_test(NAME test_library_heapsort COMMAND test_library_heapsort)
