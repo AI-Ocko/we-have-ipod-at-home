@@ -70,6 +70,12 @@ uint32_t library_track_count(const library_t *lib);
 uint32_t library_artist_count(const library_t *lib);
 uint32_t library_album_count(const library_t *lib);
 
+// The CRC-32 stored in the index's header, which identifies this exact
+// index: the same tracks always build the same index and so the same
+// checksum, and anything saved as track numbers is good only for the index
+// with the checksum it was saved under. 0 for a NULL library.
+uint32_t library_checksum(const library_t *lib);
+
 // A number that is out of range is safe to ask about everywhere below: a
 // name is then "" (never NULL), a range is first 0 and count 0, and a number
 // is UINT32_MAX. A NULL library is an empty one.

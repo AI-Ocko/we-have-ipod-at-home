@@ -1585,6 +1585,43 @@ void test_checksum_is_the_standard_crc32(void) {
   TEST_ASSERT_EQUAL_UINT32(1, rd32(img_a + H_VERSION));
 }
 
+// What the play queue is saved under: equal for the same tracks however the
+// index came to be, different for different tracks.
+void test_checksum_identifies_the_index(void) {
+  const library_track_in_t tracks[3] = {
+      trk("a/1.flac", "One", "A", "X", "A", 1, 0),
+      trk("a/2.flac", "Two", "A", "X", "A", 2, 0),
+      trk("b/1.mp3", "Three", "B", "Y", "B", 1, 0),
+  };
+  static const size_t BACKWARDS[] = {2, 1, 0};
+  const library_t *first = build(tracks, 3);
+  uint32_t checksum = library_checksum(first);
+  // It is the field the file carries.
+  size_t n = save_image(first, img_a, sizeof(img_a));
+  TEST_ASSERT_EQUAL_HEX32(rd32(img_a + H_CRC), checksum);
+  TEST_ASSERT_EQUAL_HEX32(crc32_bitwise(img_a + CRC_FROM, n - CRC_FROM),
+                          checksum);
+
+  // A second build of the same tracks, in another arena and added in another
+  // order.
+  const library_t *again =
+      build_ordered(ARENA_B, ARENA_BYTES, tracks, 3, BACKWARDS);
+  TEST_ASSERT_EQUAL_HEX32(checksum, library_checksum(again));
+  // The same index loaded from its file.
+  const library_t *loaded = NULL;
+  TEST_ASSERT_EQUAL(LIBRARY_OK,
+                    load_image(img_a, n, ARENA_B, ARENA_BYTES, &loaded));
+  TEST_ASSERT_EQUAL_HEX32(checksum, library_checksum(loaded));
+
+  // One track fewer, and one track with another title.
+  TEST_ASSERT_NOT_EQUAL(checksum, library_checksum(build(tracks, 2)));
+  library_track_in_t changed[3] = {tracks[0], tracks[1], tracks[2]};
+  changed[1].title = "Too";
+  TEST_ASSERT_NOT_EQUAL(checksum, library_checksum(build(changed, 3)));
+
+  TEST_ASSERT_EQUAL_HEX32(0, library_checksum(NULL));
+}
+
 void test_load_rejects_bad_magic(void) {
   size_t n = make_image(60);
   img_a[H_MAGIC] ^= 0x20; // "dAPL"
@@ -2529,6 +2566,7 @@ int main(void) {
   RUN_TEST(test_kept_names_are_trimmed);
   RUN_TEST(test_save_and_load_round_trip);
   RUN_TEST(test_checksum_is_the_standard_crc32);
+  RUN_TEST(test_checksum_identifies_the_index);
   RUN_TEST(test_load_rejects_bad_magic);
   RUN_TEST(test_load_rejects_wrong_version);
   RUN_TEST(test_load_rejects_a_truncated_file);

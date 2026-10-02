@@ -1683,6 +1683,10 @@ uint32_t library_album_count(const library_t *lib) {
   return lib != NULL ? FIELD(lib, n_albums) : 0;
 }
 
+uint32_t library_checksum(const library_t *lib) {
+  return lib != NULL ? FIELD(lib, crc) : 0;
+}
+
 // One artist row; the name is read when the caller reads it.
 const char *library_artist_name(const library_t *lib, uint32_t artist) {
   if (artist >= library_artist_count(lib)) {
