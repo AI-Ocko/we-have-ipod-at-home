@@ -30,7 +30,9 @@
 #define UI_TASK_PRIORITY 5
 #define UI_TASK_CORE 0
 #define PATH_MAX_BYTES 320
-#define TITLE_MAX_BYTES 256 // a file name on the card is at most 255 characters
+// The top row's text: a file name (at most 255 characters on the card), or a
+// title and an artist from the library (at most 127 each) with " - " between.
+#define TITLE_MAX_BYTES 260
 #define CARD_EVENT_QUEUE_LENGTH 2
 #define CARD_RETRY_MS 2000
 #define LIBRARY_STATUS_QUEUE_LENGTH 1 // the latest status, overwritten
@@ -57,7 +59,10 @@ typedef enum {
 // ---- the temporary playing screen (replaced in stage 5) ---------------------
 
 typedef struct {
-  char title[TITLE_MAX_BYTES]; // file name, without folder or extension
+  // "Title - Artist" from the library, or the file name without folder or
+  // extension for a track the library does not have. A copy: nothing here
+  // points into the index.
+  char title[TITLE_MAX_BYTES];
   int64_t title_since_us;      // when the track started: the marquee's zero
   uint32_t elapsed_ms;
   uint32_t duration_ms;
@@ -67,7 +72,8 @@ typedef struct {
   uint32_t scan_tracks;
   uint32_t underruns; // how many have been reported so far
   bool backlight;
-  char path[PATH_MAX_BYTES]; // scratch, for STARTED
+  char path[PATH_MAX_BYTES]; // the track last started, as the player has it
+  uint32_t library_generation; // the index the title was last looked up in
 } ui_t;
 
 static const char *error_name(player_error_t error) {
@@ -174,6 +180,48 @@ static void ui_on_key(ui_t *ui, const key_event_t *event) {
   }
 }
 
+// Put the title and artist of the track last started on the top row, if the
+// library has that track. Reads no file: one search of the index, and the
+// index is held only while the two strings are copied out of it.
+//
+// When there is no index (none loaded yet, a scan is running) or the track
+// is not in it (a file added since the last scan), the title is left as it
+// is: the file name. Nothing waits or tries again on a timer; the UI task
+// calls this again when the library publishes a new index.
+//
+// A track with no tags is in the index under the fallbacks, so it shows as
+// "<file name> - Unknown Artist".
+static void ui_title_from_library(ui_t *ui) {
+  // The index has paths relative to the card: "music/a.flac".
+  static const char root[] = STORAGE_MOUNT_POINT "/";
+  const size_t root_len = sizeof(root) - 1;
+  if (strncmp(ui->path, root, root_len) != 0) {
+    return; // nothing has started yet
+  }
+  const library_t *lib = library_task_get();
+  if (lib == NULL) {
+    return;
+  }
+  char text[TITLE_MAX_BYTES] = "";
+  uint32_t track;
+  library_track_t info;
+  if (library_find_path(lib, ui->path + root_len, &track) &&
+      library_track(lib, track, &info) && info.title[0] != '\0') {
+    if (info.artist[0] != '\0') {
+      snprintf(text, sizeof(text), "%s - %s", info.title, info.artist);
+    } else {
+      snprintf(text, sizeof(text), "%s", info.title);
+    }
+  }
+  library_task_put(); // `info` and its strings are dead from here
+
+  if (text[0] != '\0' && strcmp(text, ui->title) != 0) {
+    // Different words on the row: they are read from the beginning.
+    strcpy(ui->title, text);
+    ui->title_since_us = esp_timer_get_time();
+  }
+}
+
 static void ui_on_player_event(ui_t *ui, const player_event_t *event) {
   switch (event->type) {
   case PLAYER_EVENT_STARTED: {
@@ -186,8 +234,10 @@ static void ui_on_player_event(ui_t *ui, const player_event_t *event) {
     const char *slash = strrchr(ui->path, '/');
     translit_title(NULL, slash ? slash + 1 : ui->path, ui->title,
                    sizeof(ui->title));
-    // A new track: its title is read from the beginning. Nothing else
-    // (pause, volume, the clock) restarts the marquee.
+    ui_title_from_library(ui);
+    // A new track: its title is read from the beginning. Apart from the
+    // library supplying the title late, nothing else (pause, volume, the
+    // clock) restarts the marquee.
     ui->title_since_us = esp_timer_get_time();
     ui->elapsed_ms = 0;
     ui->duration_ms = event->duration_ms;
@@ -289,6 +339,13 @@ static void ui_task(void *arg) {
       if (xQueueReceive(s_library_status, &status, 0) == pdTRUE) {
         ui.scanning = status.scanning;
         ui.scan_tracks = status.tracks;
+        // A new index (the first load, or a scan that has finished): the
+        // track on show may have started while there was none, or its tags
+        // may have changed, so look it up again.
+        if (!status.scanning && status.generation != ui.library_generation) {
+          ui.library_generation = status.generation;
+          ui_title_from_library(&ui);
+        }
       }
     }
     // Otherwise the wait ran out: the title is due its next step.
