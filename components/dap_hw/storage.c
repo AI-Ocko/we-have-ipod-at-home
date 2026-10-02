@@ -1,12 +1,9 @@
 #include "storage.h"
 
 #include "driver/sdmmc_host.h"
-#include "esp_log.h"
 #include "esp_vfs_fat.h"
 #include "sdmmc_cmd.h"
 #include <stdio.h>
-
-static const char *TAG = "storage";
 
 static sdmmc_card_t *s_card;
 
@@ -30,11 +27,14 @@ esp_err_t storage_mount(void) {
   slot_config.width = 1;
   slot_config.flags |= SDMMC_SLOT_FLAG_INTERNAL_PULLUP;
 
-  ESP_LOGI(TAG, "Mounting SD card");
   esp_err_t ret = esp_vfs_fat_sdmmc_mount(STORAGE_MOUNT_POINT, &host,
                                           &slot_config, &mount_config, &s_card);
   if (ret != ESP_OK) {
-    ESP_LOGE(TAG, "Failed to mount SD card (%s)", esp_err_to_name(ret));
+    // A failed mount has already undone itself: the IDF frees the card
+    // structure, removes the slot and deletes the host controller before it
+    // returns, so there is nothing to release here and calling again is safe.
+    // Nothing is logged: the caller may be retrying, and decides how much to
+    // say.
     s_card = NULL;
     return ret;
   }

@@ -27,6 +27,8 @@
 #define UI_TASK_PRIORITY 5
 #define UI_TASK_CORE 0
 #define PATH_MAX_BYTES 320
+#define CARD_EVENT_QUEUE_LENGTH 2
+#define CARD_RETRY_MS 2000
 
 static const char *TAG = "dap";
 // The player's events are logged here, by the task that reads them, under
@@ -35,7 +37,16 @@ static const char *PLAYER_TAG = "player";
 
 static QueueHandle_t s_key_events;
 static QueueHandle_t s_player_events;
-static QueueSetHandle_t s_ui_events; // both of the above
+static QueueHandle_t s_card_events;
+static QueueSetHandle_t s_ui_events; // all of the above
+
+// What the main task tells the UI task about the card at start-up. The UI
+// task owns the LCD, so the task that waits for the card cannot draw the
+// "insert card" screen itself; it sends one of these instead.
+typedef enum {
+  CARD_EVENT_WAITING, // the card did not mount; the mount is being retried
+  CARD_EVENT_MOUNTED, // the wait is over
+} card_event_t;
 
 // ---- the temporary playing screen (replaced in stage 5) ---------------------
 
@@ -44,6 +55,7 @@ typedef struct {
   uint32_t elapsed_ms;
   uint32_t duration_ms;
   bool failed; // the last `play` ended in an error
+  bool no_card; // start-up is still waiting for a card that mounts
   uint32_t underruns; // how many have been reported so far
   bool backlight;
   char path[PATH_MAX_BYTES]; // scratch, for STARTED
@@ -67,6 +79,14 @@ static const char *error_name(player_error_t error) {
 
 // "> 0:12/4:15  V10": playing or paused, elapsed and total time, volume.
 static void ui_render(const ui_t *ui, screen_t *screen) {
+  if (ui->no_card) {
+    // Nothing can play without a card, so this replaces the playing screen
+    // whatever else happens (a `play` from the console fails, for one).
+    screen_set_row(screen, 0, "Insert SD card");
+    screen_set_row(screen, 1, "");
+    return;
+  }
+
   player_status_t status;
   player_get_status(&status);
 
@@ -166,8 +186,8 @@ static void ui_on_player_event(ui_t *ui, const player_event_t *event) {
   }
 }
 
-// Owns the LCD. Sleeps until a key event or a player event arrives; the
-// queue set is what lets it wait for both at once.
+// Owns the LCD. Sleeps until a key event, a player event or a card event
+// arrives; the queue set is what lets it wait for all of them at once.
 static void ui_task(void *arg) {
   (void)arg;
   static ui_t ui; // too big for comfort on the stack
@@ -190,6 +210,13 @@ static void ui_task(void *arg) {
       if (xQueueReceive(s_player_events, &event, 0) == pdTRUE) {
         ui_on_player_event(&ui, &event);
       }
+    } else if (ready == s_card_events) {
+      card_event_t event;
+      if (xQueueReceive(s_card_events, &event, 0) == pdTRUE) {
+        ui.no_card = (event == CARD_EVENT_WAITING);
+        // A `play` that failed for want of a card says nothing about now.
+        ui.failed = false;
+      }
     }
     ui_render(&ui, &screen);
     lcd_show(&screen);
@@ -204,11 +231,15 @@ static void start_display_and_keys(void) {
   s_key_events = xQueueCreate(KEY_QUEUE_LENGTH, sizeof(key_event_t));
   s_player_events =
       xQueueCreate(PLAYER_EVENT_QUEUE_LENGTH, sizeof(player_event_t));
-  s_ui_events = xQueueCreateSet(KEY_QUEUE_LENGTH + PLAYER_EVENT_QUEUE_LENGTH);
-  configASSERT(s_key_events && s_player_events && s_ui_events);
+  s_card_events = xQueueCreate(CARD_EVENT_QUEUE_LENGTH, sizeof(card_event_t));
+  s_ui_events = xQueueCreateSet(KEY_QUEUE_LENGTH + PLAYER_EVENT_QUEUE_LENGTH +
+                                CARD_EVENT_QUEUE_LENGTH);
+  configASSERT(s_key_events && s_player_events && s_card_events &&
+               s_ui_events);
   // Queues must join the set while still empty, so before anything posts.
   xQueueAddToSet(s_key_events, s_ui_events);
   xQueueAddToSet(s_player_events, s_ui_events);
+  xQueueAddToSet(s_card_events, s_ui_events);
 
   // The LCD is set up here, before the UI task exists; from then on only
   // that task touches it.
@@ -275,6 +306,46 @@ static bool find_flac(char *out, size_t out_len) {
          find_flac_in(STORAGE_MOUNT_POINT, out, out_len);
 }
 
+// Mount the card, however long that takes. On this board a cold plug-in to a
+// computer's USB port leaves the card deaf until it is taken out and put
+// back, so a failed mount is not final: say so on the LCD and try again
+// every two seconds. Returns once the card is mounted.
+//
+// This runs in the main task, which has nothing else to do and has the
+// lowest priority of all our tasks, so the keys, the LCD, the console and
+// the player carry on while it waits. Both the mount attempt and the pause
+// between attempts block; neither spins.
+static void wait_for_card(void) {
+  ESP_LOGI(TAG, "Mounting SD card");
+  uint32_t attempts = 1;
+  esp_err_t err = storage_mount();
+  if (err == ESP_OK) {
+    return;
+  }
+
+  ESP_LOGW(TAG, "No usable SD card (%s); retrying every %d seconds",
+           esp_err_to_name(err), CARD_RETRY_MS / 1000);
+  // At most two card events are ever sent, and the queue holds two, so
+  // neither send can block or be lost.
+  card_event_t event = CARD_EVENT_WAITING;
+  xQueueSend(s_card_events, &event, portMAX_DELAY);
+
+  for (;;) {
+    vTaskDelay(pdMS_TO_TICKS(CARD_RETRY_MS));
+    attempts++;
+    err = storage_mount();
+    if (err == ESP_OK) {
+      break;
+    }
+    ESP_LOGW(TAG, "Mount attempt %" PRIu32 " failed (%s)", attempts,
+             esp_err_to_name(err));
+  }
+
+  ESP_LOGI(TAG, "SD card mounted after %" PRIu32 " attempts", attempts);
+  event = CARD_EVENT_MOUNTED;
+  xQueueSend(s_card_events, &event, portMAX_DELAY);
+}
+
 void app_main(void) {
   // Screen and keys first: they work with or without a card.
   start_display_and_keys();
@@ -296,10 +367,7 @@ void app_main(void) {
     ESP_LOGW(TAG, "No debug console (%s)", esp_err_to_name(err));
   }
 
-  if (storage_mount() != ESP_OK) {
-    ESP_LOGE(TAG, "No usable SD card; nothing to play");
-    return;
-  }
+  wait_for_card();
 
   // Play the first FLAC we find. The card stays mounted afterwards.
   char track[PATH_MAX_BYTES];
