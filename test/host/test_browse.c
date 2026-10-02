@@ -753,6 +753,282 @@ void test_select_past_the_count_on_show_does_nothing(void) {
   assert_plays(7, TRACKLIST_SONGS, 0, "Everything In Its Right Place");
 }
 
+// --- What is under the cursor ------------------------------------------------
+
+// What is under `row`, asked without changing anything on the stack.
+static browse_target_t target_in(const library_t *l, uint32_t row) {
+  browse_menu(&b)->cursor = row;
+  browse_t before = b;
+  browse_target_t t = browse_target(&b, l);
+  TEST_ASSERT_EQUAL_MEMORY(&before, &b, sizeof(b));
+  return t;
+}
+
+static void assert_no_target_in(const library_t *l, uint32_t row) {
+  browse_target_t t = target_in(l, row);
+  TEST_ASSERT_EQUAL_INT(BROWSE_TARGET_NONE, t.kind);
+  TEST_ASSERT_EQUAL_INT(TRACKLIST_NONE, t.list.kind);
+  TEST_ASSERT_EQUAL_UINT32(0, t.list.id);
+  TEST_ASSERT_EQUAL_UINT32(0, t.index);
+}
+
+static void assert_no_target(uint32_t row) { assert_no_target_in(lib, row); }
+
+// `row` is a track: the one called `title`, at that position of `kind`/`id`,
+// which is the list on the screen.
+static void assert_track_target(uint32_t row, tracklist_kind_t kind,
+                                uint32_t id, const char *title) {
+  browse_target_t t = target_in(lib, row);
+  TEST_ASSERT_EQUAL_INT(BROWSE_TARGET_TRACK, t.kind);
+  TEST_ASSERT_EQUAL_INT(kind, t.list.kind);
+  TEST_ASSERT_EQUAL_UINT32(id, t.list.id);
+  TEST_ASSERT_EQUAL_UINT32(row, t.index);
+  TEST_ASSERT_EQUAL_UINT32(browse_menu(&b)->count,
+                           tracklist_count(lib, t.list));
+  TEST_ASSERT_EQUAL_STRING(
+      title, lib16_title(lib, tracklist_track(lib, t.list, t.index)));
+  TEST_ASSERT_EQUAL_STRING(title, item(row));
+}
+
+// `row` is the album or artist `id`, shown as `row_text`, whose
+// tracks are `titles`.
+static void assert_list_target(uint32_t row, browse_target_kind_t kind,
+                               uint32_t id, const char *row_text,
+                               const char *const *titles, uint32_t n) {
+  browse_target_t t = target_in(lib, row);
+  TEST_ASSERT_EQUAL_INT(kind, t.kind);
+  TEST_ASSERT_EQUAL_INT(kind == BROWSE_TARGET_ALBUM ? TRACKLIST_ALBUM
+                                                    : TRACKLIST_ARTIST,
+                        t.list.kind);
+  TEST_ASSERT_EQUAL_UINT32(id, t.list.id);
+  TEST_ASSERT_EQUAL_UINT32(0, t.index);
+  TEST_ASSERT_EQUAL_STRING(row_text, item(row));
+  TEST_ASSERT_EQUAL_UINT32(n, tracklist_count(lib, t.list));
+  for (uint32_t i = 0; i < n; i++) {
+    TEST_ASSERT_EQUAL_STRING(titles[i],
+                             lib16_title(lib, tracklist_track(lib, t.list, i)));
+  }
+}
+
+void test_target_of_a_track_row(void) {
+  // In an album.
+  enter(ARTISTS);
+  enter(RADIOHEAD);
+  enter(1);
+  assert_track_target(0, TRACKLIST_ALBUM, KID_A,
+                      "Everything In Its Right Place");
+  assert_track_target(2, TRACKLIST_ALBUM, KID_A, "Motion Picture Soundtrack");
+  TEST_ASSERT_TRUE(browse_back(&b));
+
+  // In an artist's songs.
+  enter(0);
+  assert_track_target(0, TRACKLIST_ARTIST, RADIOHEAD,
+                      "Everything In Its Right Place");
+  assert_track_target(3, TRACKLIST_ARTIST, RADIOHEAD, "Airbag");
+  assert_track_target(4, TRACKLIST_ARTIST, RADIOHEAD, "Paranoid Android");
+  browse_library_changed(&b);
+
+  // In an album reached through Albums.
+  enter(ALBUMS);
+  enter(2);
+  assert_track_target(1, TRACKLIST_ALBUM, HITS_VARIOUS, "Beta");
+  browse_library_changed(&b);
+
+  // In Songs.
+  enter(SONGS);
+  assert_track_target(0, TRACKLIST_SONGS, 0, "Airbag");
+  assert_track_target(4, TRACKLIST_SONGS, 0, "Bohemian Rhapsody");
+  assert_track_target(15, TRACKLIST_SONGS, 0, "untagged song");
+
+  // It is the list and the row that selecting the track would play.
+  browse_target_t t = target_in(lib, 9);
+  browse_result_t r = act(9, BROWSE_PLAY);
+  TEST_ASSERT_EQUAL_INT(r.list.kind, t.list.kind);
+  TEST_ASSERT_EQUAL_UINT32(r.list.id, t.list.id);
+  TEST_ASSERT_EQUAL_UINT32(r.index, t.index);
+}
+
+void test_target_of_an_album_row(void) {
+  static const char *const QUEEN_HITS[] = {"Bohemian Rhapsody"};
+  static const char *const VARIOUS_HITS[] = {"Alpha", "Beta", "Gamma"};
+  static const char *const OK_COMPUTER_TITLES[] = {"Airbag",
+                                                   "Paranoid Android"};
+
+  // In Albums, which is A to Z and so not in the order of album numbers. The
+  // two albums of one name are each themselves.
+  enter(ALBUMS);
+  assert_list_target(1, BROWSE_TARGET_ALBUM, HITS_QUEEN, "Greatest Hits",
+                     QUEEN_HITS, 1);
+  assert_list_target(2, BROWSE_TARGET_ALBUM, HITS_VARIOUS, "Greatest Hits",
+                     VARIOUS_HITS, 3);
+  assert_list_target(4, BROWSE_TARGET_ALBUM, KID_A, "Kid A", KID_A_TITLES, 3);
+  static const uint32_t ALBUM_AT[] = {DEEP_ALBUM, HITS_QUEEN,  HITS_VARIOUS,
+                                      HOMOGENIC,  KID_A,       OK_COMPUTER,
+                                      UNKNOWN_ALBUM};
+  for (uint32_t row = 0; row < 7; row++) {
+    browse_target_t t = target_in(lib, row);
+    TEST_ASSERT_EQUAL_INT(BROWSE_TARGET_ALBUM, t.kind);
+    TEST_ASSERT_EQUAL_INT(TRACKLIST_ALBUM, t.list.kind);
+    TEST_ASSERT_EQUAL_UINT32(ALBUM_AT[row], t.list.id);
+  }
+  browse_library_changed(&b);
+
+  // Under an artist, where row 0 is not an album.
+  enter(ARTISTS);
+  enter(RADIOHEAD);
+  assert_list_target(1, BROWSE_TARGET_ALBUM, KID_A, "Kid A", KID_A_TITLES, 3);
+  assert_list_target(2, BROWSE_TARGET_ALBUM, OK_COMPUTER, "OK Computer",
+                     OK_COMPUTER_TITLES, 2);
+  TEST_ASSERT_TRUE(browse_back(&b));
+  enter(VARIOUS);
+  assert_list_target(1, BROWSE_TARGET_ALBUM, HITS_VARIOUS, "Greatest Hits",
+                     VARIOUS_HITS, 3);
+
+  // It is the album that selecting the row opens.
+  browse_target_t t = target_in(lib, 1);
+  enter(1);
+  TEST_ASSERT_EQUAL_UINT32(level()->id, t.list.id);
+}
+
+void test_target_of_an_artist_row(void) {
+  static const char *const BJORK_TITLES[] = {"Hunter", "Joga"};
+  enter(ARTISTS);
+  assert_list_target(BJORK, BROWSE_TARGET_ARTIST, BJORK, "Bjork", BJORK_TITLES,
+                     2);
+  assert_list_target(RADIOHEAD, BROWSE_TARGET_ARTIST, RADIOHEAD, "Radiohead",
+                     RADIOHEAD_TITLES, 5);
+  for (uint32_t row = 0; row < 6; row++) {
+    browse_target_t t = target_in(lib, row);
+    TEST_ASSERT_EQUAL_INT(BROWSE_TARGET_ARTIST, t.kind);
+    TEST_ASSERT_EQUAL_INT(TRACKLIST_ARTIST, t.list.kind);
+    TEST_ASSERT_EQUAL_UINT32(row, t.list.id);
+    TEST_ASSERT_EQUAL_STRING(ARTIST_NAMES[row], item(row));
+  }
+
+  // It is the list that the artist's "All songs" row opens.
+  browse_target_t t = target_in(lib, RADIOHEAD);
+  enter(RADIOHEAD);
+  enter(0);
+  assert_track_target(0, t.list.kind, t.list.id,
+                      "Everything In Its Right Place");
+}
+
+void test_no_target_for_all_songs_main_and_settings(void) {
+  browse_refresh(&b, lib);
+  for (uint32_t row = 0; row < 5; row++) {
+    assert_no_target(row);
+  }
+  enter(SETTINGS);
+  for (uint32_t row = 0; row < 3; row++) {
+    assert_no_target(row);
+  }
+  browse_library_changed(&b);
+
+  enter(ARTISTS);
+  enter(RADIOHEAD);
+  TEST_ASSERT_EQUAL_STRING("All songs", item(0));
+  assert_no_target(0);
+  TEST_ASSERT_TRUE(browse_back(&b));
+  enter(UNKNOWN_ARTIST);
+  assert_no_target(0);
+}
+
+void test_no_target_with_a_null_library_or_stale_cursor(void) {
+  // No stack.
+  browse_target_t none = browse_target(NULL, lib);
+  TEST_ASSERT_EQUAL_INT(BROWSE_TARGET_NONE, none.kind);
+  TEST_ASSERT_EQUAL_INT(TRACKLIST_NONE, none.list.kind);
+
+  // No index: the library lists are empty, and the fixed menus still have
+  // nothing to offer.
+  browse_refresh(&b, NULL);
+  assert_no_target_in(NULL, ARTISTS);
+  static const uint32_t LISTS[] = {ARTISTS, ALBUMS, SONGS};
+  for (size_t i = 0; i < 3; i++) {
+    browse_menu(&b)->cursor = LISTS[i];
+    TEST_ASSERT_EQUAL_INT(BROWSE_ENTERED, browse_select(&b, NULL).action);
+    TEST_ASSERT_EQUAL_UINT32(0, browse_menu(&b)->count);
+    assert_no_target_in(NULL, 0);
+    TEST_ASSERT_TRUE(browse_back(&b));
+  }
+
+  // The index goes away under each kind of level, before any refresh: the
+  // counts on the stack still say there are rows.
+  enter(ARTISTS);
+  assert_no_target_in(NULL, RADIOHEAD);
+  enter(RADIOHEAD);
+  assert_no_target_in(NULL, 1);
+  enter(1);
+  assert_no_target_in(NULL, 0);
+  TEST_ASSERT_TRUE(browse_back(&b));
+  enter(0);
+  assert_no_target_in(NULL, 0);
+  browse_library_changed(&b);
+  enter(ALBUMS);
+  assert_no_target_in(NULL, 3);
+  browse_library_changed(&b);
+  enter(SONGS);
+  assert_no_target_in(NULL, 3);
+
+  // A cursor past the rows the user was shown, although the index has a
+  // track there.
+  browse_menu(&b)->count = 3;
+  assert_no_target(7);
+  assert_no_target(3);
+  assert_no_target(UINT32_MAX);
+  TEST_ASSERT_EQUAL_INT(BROWSE_TARGET_TRACK, target_in(lib, 2).kind);
+  browse_menu(&b)->count = 0;
+  assert_no_target(0);
+  browse_library_changed(&b);
+
+  // A smaller index (Radiohead alone: 1 artist, 2 albums, 5 tracks) under a
+  // stack that has not been refreshed: rows it no longer has are nothing.
+  const library_t *small = lib16_build(other_words, LIB16_RADIOHEAD_ONLY);
+  enter(SONGS);
+  assert_no_target_in(small, 15);
+  assert_no_target_in(small, 5);
+  TEST_ASSERT_EQUAL_INT(BROWSE_TARGET_TRACK, target_in(small, 4).kind);
+  browse_library_changed(&b);
+  enter(ALBUMS);
+  assert_no_target_in(small, 6);
+  assert_no_target_in(small, 2);
+  TEST_ASSERT_EQUAL_INT(BROWSE_TARGET_ALBUM, target_in(small, 1).kind);
+  browse_library_changed(&b);
+  enter(ARTISTS);
+  assert_no_target_in(small, VARIOUS);
+  assert_no_target_in(small, 1);
+  TEST_ASSERT_EQUAL_INT(BROWSE_TARGET_ARTIST, target_in(small, 0).kind);
+
+  // Levels whose own number the smaller index does not have: an artist, its
+  // songs, an album.
+  enter(VARIOUS);
+  assert_no_target_in(small, 1);
+  assert_no_target_in(small, 0);
+  enter(1);
+  assert_no_target_in(small, 0);
+  TEST_ASSERT_TRUE(browse_back(&b));
+  enter(0);
+  assert_no_target_in(small, 0);
+  TEST_ASSERT_TRUE(browse_back(&b));
+  // An album row past the artist's albums.
+  browse_menu(&b)->count = 5;
+  assert_no_target(2);
+  assert_no_target(4);
+
+  // A damaged stack: no call goes outside it.
+  static const int DEPTHS[] = {-1, BROWSE_DEPTH_MAX, 1000, INT32_MIN,
+                               INT32_MAX};
+  for (size_t i = 0; i < sizeof(DEPTHS) / sizeof(DEPTHS[0]); i++) {
+    browse_init(&b);
+    b.depth = DEPTHS[i];
+    TEST_ASSERT_EQUAL_INT(BROWSE_TARGET_NONE, browse_target(&b, lib).kind);
+    TEST_ASSERT_EQUAL_INT(DEPTHS[i], b.depth); // not even put right
+  }
+  browse_init(&b);
+  b.levels[0].screen = (browse_screen_t)77;
+  assert_no_target(0);
+}
+
 // --- Text out ----------------------------------------------------------------
 
 void test_long_item_text_is_cut_to_the_buffer(void) {
@@ -991,6 +1267,11 @@ int main(void) {
   RUN_TEST(test_library_changed_returns_to_main);
   RUN_TEST(test_refresh_after_a_smaller_library_clamps_the_cursor);
   RUN_TEST(test_select_past_the_count_on_show_does_nothing);
+  RUN_TEST(test_target_of_a_track_row);
+  RUN_TEST(test_target_of_an_album_row);
+  RUN_TEST(test_target_of_an_artist_row);
+  RUN_TEST(test_no_target_for_all_songs_main_and_settings);
+  RUN_TEST(test_no_target_with_a_null_library_or_stale_cursor);
   RUN_TEST(test_long_item_text_is_cut_to_the_buffer);
   RUN_TEST(test_the_deepest_path_fits);
   RUN_TEST(test_a_full_stack_refuses_to_go_deeper);

@@ -7,8 +7,9 @@
 // A level is a kind of list, the number of the thing it lists (an artist or
 // an album) and a cursor. What its items are is worked out from the index
 // each time it is asked, with a fixed number of index queries per item
-// whatever the size of the library; the queries are listed at item_text and
-// browse_select. Nothing here walks tracks, albums or artists.
+// whatever the size of the library; the queries are listed at item_text,
+// browse_select and browse_target. Nothing here walks tracks, albums or
+// artists.
 //
 // The stack keeps no text and no pointers, because the index can be
 // withdrawn between any two calls. Text is copied into the caller's buffer
@@ -409,6 +410,80 @@ browse_result_t browse_select(browse_t *b, const library_t *lib) {
     result.action = BROWSE_ENTERED;
   }
   return result;
+}
+
+// What it asks the index, one query whatever the size of the library:
+//   Main, Settings  nothing
+//   Artists         library_artist_albums: is there such an artist?
+//   an artist       library_artist_albums: the artist, and which album
+//   Albums          library_album_by_name: which album
+//   a track         tracklist_track: is there a track at this position?
+// The same questions as browse_select, so what the options menu is offered
+// for is what selecting the row would open or play.
+browse_target_t browse_target(const browse_t *b, const library_t *lib) {
+  browse_target_t target = {.kind = BROWSE_TARGET_NONE,
+                            .list = {.kind = TRACKLIST_NONE, .id = 0},
+                            .index = 0};
+  if (b == NULL) {
+    return target;
+  }
+  const browse_level_t *level = level_of(b);
+  uint32_t cursor = level->menu.cursor;
+  if (cursor >= level->menu.count) {
+    return target; // an empty list
+  }
+
+  switch (level->screen) {
+  case BROWSE_MAIN:
+  case BROWSE_SETTINGS:
+    break;
+
+  case BROWSE_ARTISTS: {
+    uint32_t first, albums;
+    library_artist_albums(lib, cursor, &first, &albums);
+    if (albums != 0) {
+      target.kind = BROWSE_TARGET_ARTIST;
+      target.list.kind = TRACKLIST_ARTIST;
+      target.list.id = cursor;
+    }
+    break;
+  }
+
+  case BROWSE_ARTIST: {
+    uint32_t first, albums;
+    library_artist_albums(lib, level->id, &first, &albums);
+    // Row 0 is "All songs", which is not a thing to act on.
+    if (cursor != 0 && cursor - 1 < albums) {
+      target.kind = BROWSE_TARGET_ALBUM;
+      target.list.kind = TRACKLIST_ALBUM;
+      target.list.id = first + (cursor - 1);
+    }
+    break;
+  }
+
+  case BROWSE_ALBUMS: {
+    uint32_t album = library_album_by_name(lib, cursor);
+    if (album != UINT32_MAX) {
+      target.kind = BROWSE_TARGET_ALBUM;
+      target.list.kind = TRACKLIST_ALBUM;
+      target.list.id = album;
+    }
+    break;
+  }
+
+  case BROWSE_ARTIST_SONGS:
+  case BROWSE_ALBUM:
+  case BROWSE_SONGS: {
+    tracklist_t list = tracks_of(level);
+    if (tracklist_track(lib, list, cursor) != UINT32_MAX) {
+      target.kind = BROWSE_TARGET_TRACK;
+      target.list = list;
+      target.index = cursor;
+    }
+    break;
+  }
+  }
+  return target;
 }
 
 bool browse_back(browse_t *b) {

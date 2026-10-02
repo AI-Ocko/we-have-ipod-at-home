@@ -52,6 +52,19 @@ typedef struct {
   uint32_t index;
 } browse_result_t;
 
+typedef enum {
+  BROWSE_TARGET_NONE,   // nothing the options menu applies to
+  BROWSE_TARGET_TRACK,  // `list` and `index` say which
+  BROWSE_TARGET_ALBUM,  // `list` is the album
+  BROWSE_TARGET_ARTIST, // `list` is all the artist's tracks
+} browse_target_kind_t;
+
+typedef struct {
+  browse_target_kind_t kind;
+  tracklist_t list;
+  uint32_t index; // for a track: its position in `list`
+} browse_target_t;
+
 // Start at the main menu.
 void browse_init(browse_t *b);
 
@@ -87,3 +100,6 @@ browse_result_t browse_select(browse_t *b, const library_t *lib);
 
 // Go back one level. False at the main menu.
 bool browse_back(browse_t *b);
+
+// What is under the cursor, for the options menu. Does not change the level.
+browse_target_t browse_target(const browse_t *b, const library_t *lib);
