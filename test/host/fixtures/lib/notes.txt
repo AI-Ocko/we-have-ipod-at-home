@@ -1,0 +1,1 @@
+Notes that sit beside the music. Not audio; the scanner must ignore this file.
