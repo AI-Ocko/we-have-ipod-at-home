@@ -68,6 +68,10 @@
 // is called. If there is no index, or the queue says that playback is over,
 // nothing is started and Now Playing shows the last track, stopped, at 0:00.
 //
+// A stop that is not the queue's doing (a scan, the console's `stop`) leaves
+// a queue track where it was: Now Playing shows it paused at the time it
+// had reached, and D goes on from there.
+//
 // Next and Previous work when nothing is playing too: they move in the
 // queue and start the track. Next at the end of the queue with loop off (or
 // loop one: play_queue.h) stops playback and stays on the last track.
@@ -101,23 +105,35 @@
 // The state task (state_task.h) does the saving; each call here copies what
 // it is given and returns.
 //
-//   the queue      queue_changed, the one place that hands it over: when a
-//                  track of the queue is started (its position moved, or the
-//                  queue was replaced), when something is added, when
-//                  shuffle is turned on or off, and when the queue is
-//                  emptied. Never from a position event, and never before
-//                  the queue saved at power-off has been asked for
+//   the queue      queue_changed, the one place that hands it over, and
+//                  only when what the queue HOLDS has changed: it is
+//                  replaced by a list, something is added, shuffle is
+//                  turned on or off, it is emptied, and once after the
+//                  power-on restore. Moving in it (next, previous, a track
+//                  ending, a track repeating, D) hands nothing over: the
+//                  hand-over costs a pass over the whole queue, and the
+//                  place in the queue is the position's business. Never
+//                  before the queue saved at power-off has been asked for
 //                  (ui->queue_restored): the first hand-over makes the state
 //                  task give that queue up.
 //   the position   save_position: the queue's position, the track there and
-//                  the time into it. When a queue track is started or
-//                  becomes current (at power-on too: nothing is written if
-//                  flash has it already), when it is paused with D or 5,
-//                  when playback comes to rest (the time is then 0), when
-//                  shuffle moves the current track to another place, and
-//                  when a position event shows that UI_SAVE_EVERY_MS of the
-//                  track have played since the last save. Nothing is saved
-//                  for a track the console started.
+//                  the time into it; flash is where these are believed. When
+//                  a queue track is started or becomes current (at power-on
+//                  too: nothing is written if flash has it already), when it
+//                  is paused with D or 5, when it is stopped for a scan or
+//                  by the console (the time it had reached, so that D goes
+//                  on from there), when playback comes to rest (the time is
+//                  then 0), when shuffle moves the current track to another
+//                  place, and when a position event shows that
+//                  UI_SAVE_EVERY_MS of the track have played since the last
+//                  save.
+//                  While a track the console started is on Now Playing its
+//                  time is not saved, but the saved position must still be
+//                  one the queue has, or a later power-on could take an old
+//                  place and time for a new queue's: save_place writes the
+//                  queue's place with the time 0 when the queue gets its
+//                  first track or is shuffled under such a track, and a
+//                  position no queue has when the queue is emptied.
 //   the settings   shuffle and loop, when 1 or 3 changes them (and Shuffle
 //                  play). The volume is ui.c's.
 //
@@ -126,8 +142,13 @@
 // The first index the UI sees is the moment the saved queue is restored, in
 // the order state_task.h gives (WHO IS BELIEVED): the queue as its file has
 // it; then the position saved in flash, if the queue has that track at that
-// place; then loop and shuffle from the settings, which are flash's. If the
-// queue then has a current track, it is put on Now Playing as a remembered
+// place; then loop and shuffle from the settings, which are flash's. The
+// saved position is looked at once more after that: a power cut between the
+// flash save and the file save of a shuffle change leaves a file in the old
+// order, and only with flash's shuffle applied is the track at the saved
+// place. Either way the saved time is used only for the saved track at the
+// saved place. If the queue then has a current track, it is put on Now
+// Playing as a remembered
 // track at the saved time, and nothing is started: D or 5 plays it from
 // there.
 
@@ -239,6 +260,20 @@ static void save_position(ui_t *ui) {
   play->saved_ms = play->elapsed_ms;
 }
 
+// The queue has changed under a track that is not its own, or has been
+// emptied: make the saved position one this queue has, with no time, or one
+// no queue has. See WHAT IS SAVED.
+static void save_place(ui_t *ui) {
+  // No queue is this long, so no restore can match it.
+  state_position_t position = {
+      .position = UINT16_MAX, .track = UINT16_MAX, .elapsed_ms = 0};
+  if (ui->queue.count != 0) {
+    position.position = ui->queue.position;
+    position.track = play_queue_current(&ui->queue);
+  }
+  state_task_save_position(&position);
+}
+
 // --- the queue ---------------------------------------------------------------
 
 void ui_play_init(ui_t *ui, uint16_t *orders) {
@@ -283,10 +318,9 @@ static void start(ui_t *ui, uint32_t start_ms) {
     play->active = false;
     play->min_id = play->play_id + 1;
   }
-  if (play->from_queue) {
-    queue_changed(ui);
-    save_position(ui);
-  }
+  // The place in the queue and the time, not the queue: it holds what it
+  // held.
+  save_position(ui);
 }
 
 void ui_play_start(ui_t *ui) { start(ui, 0); }
@@ -315,10 +349,12 @@ bool ui_play_load(ui_t *ui, const library_t *lib, tracklist_t list,
     // empty now, so whatever is playing is not its track any more.
     ui->play.from_queue = false;
     queue_changed(ui);
+    save_place(ui);
     return false;
   }
   load_current(ui, lib, now_us);
-  return true; // ui_play_start hands the new queue over
+  queue_changed(ui);
+  return true; // ui_play_start saves the position
 }
 
 bool ui_play_add(ui_t *ui, const library_t *lib, const browse_target_t *target,
@@ -349,9 +385,19 @@ bool ui_play_add(ui_t *ui, const library_t *lib, const browse_target_t *target,
     // track D starts. It does not start by itself.
     load_current(ui, lib, now_us);
     save_position(ui);
+  } else if (was_empty) {
+    save_place(ui); // the console's track plays on; the queue has a place
   }
   queue_changed(ui);
   return true;
+}
+
+// Stop the player, and take none of the stopped track's events as news.
+static void stop_player(ui_t *ui) {
+  // After any `play` of ours in the player's queue, so that a track started
+  // a moment ago (the one before it having just ended) is stopped too.
+  player_stop();
+  ui->play.min_id = ui->play.play_id + 1;
 }
 
 // Playback is over, not just a track: the last track stays on show, stopped,
@@ -434,7 +480,8 @@ static void skip(ui_t *ui, move_t how, int64_t now_us) {
     // The queue stays on its last track. If that track is not playing
     // there is nothing to stop, and it keeps the time it shows.
     if (ui->play.active || ui->play.notice_until_us != 0) {
-      ui_play_stop(ui);
+      stop_player(ui);
+      come_to_rest(ui);
     }
     break;
   case MOVED_NOWHERE:
@@ -454,8 +501,14 @@ void ui_play_toggle_shuffle(ui_t *ui, int64_t now_us) {
   play_queue_set_shuffle(&ui->queue, on);
   ui->settings.shuffle = on;
   state_task_save_settings(&ui->settings);
-  queue_changed(ui);
-  save_position(ui);
+  if (ui->queue.count != 0) {
+    queue_changed(ui);
+    if (ui->play.from_queue) {
+      save_position(ui);
+    } else {
+      save_place(ui);
+    }
+  }
   ui_overlay_show(ui, on ? UI_OVERLAY_SHUFFLE_ON : UI_OVERLAY_SHUFFLE_OFF,
                   now_us);
 }
@@ -650,11 +703,18 @@ void ui_play_on_time(ui_t *ui, int64_t now_us) {
 
 void ui_play_stop(ui_t *ui) {
   ui_play_t *play = &ui->play;
-  // After any `play` of ours in the player's queue, so that a track started
-  // a moment ago (the one before it having just ended) is stopped too.
-  player_stop();
-  come_to_rest(ui); // and no next track after a notice either
-  play->min_id = play->play_id + 1;
+  stop_player(ui);
+  play->active = false;
+  play->notice_until_us = 0; // and no next track after a notice either
+  play->failures = 0;
+  if (play->from_queue) {
+    // The queue's track stays where it had got to (or where it was waiting,
+    // if it was never started): D goes on from there, and so does the next
+    // power-on.
+    save_position(ui);
+  } else {
+    play->elapsed_ms = 0; // the console's track: D plays it from 0:00
+  }
 }
 
 // The first index: put the saved queue, position and settings together. See
@@ -675,21 +735,26 @@ static bool restore(ui_t *ui, const library_t *lib, int64_t now_us) {
   // stands and its track starts from the beginning.
   uint32_t elapsed_ms = 0;
   state_position_t saved;
-  bool placed = restored && state_task_loaded_position(&saved) &&
-                saved.position < q->count &&
+  bool has_saved = restored && state_task_loaded_position(&saved);
+  bool placed = has_saved && saved.position < q->count &&
                 q->play[saved.position] == saved.track &&
                 play_queue_set_position(q, saved.position);
-  if (placed) {
-    elapsed_ms = saved.elapsed_ms;
-  }
   // The settings are the UI's: what flash had, and any change since.
   play_queue_set_loop(q, ui->settings.loop);
   play_queue_set_shuffle(q, ui->settings.shuffle);
+  // Flash can be one shuffle change ahead of the file: then the saved track
+  // is at the saved place only now. See AT POWER-ON.
+  bool timed = placed || (has_saved && q->count != 0 &&
+                          q->position == saved.position &&
+                          play_queue_current(q) == saved.track);
+  if (timed) {
+    elapsed_ms = saved.elapsed_ms;
+  }
   ESP_LOGI(TAG,
            "queue %s: %" PRIu32 " tracks, position %" PRIu32 "%s, shuffle %d, "
            "loop %d",
            restored ? "restored" : "not restored", q->count, q->position,
-           placed ? " (as saved)" : "", (int)q->shuffle, (int)q->loop);
+           timed ? " (as saved)" : "", (int)q->shuffle, (int)q->loop);
   // From here on the queue is handed over when it changes. This first time
   // it is what the file holds, unless the settings above changed it.
   queue_changed(ui);
@@ -730,6 +795,7 @@ bool ui_play_library_changed(ui_t *ui, int64_t now_us) {
       }
     }
     queue_changed(ui);
+    save_place(ui); // the saved position was the old queue's
   }
   find_again(ui, lib, now_us);
   library_task_put();

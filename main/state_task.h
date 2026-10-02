@@ -137,8 +137,11 @@ void state_task_card_ready(void);
 bool state_task_restore_queue(play_queue_t *q, const library_t *lib);
 
 // Hand over the queue as it now is, and the checksum (library_checksum) of
-// the index its track numbers belong to. Call on any change to the queue,
-// position-only changes included.
+// the index its track numbers belong to. Call when what the queue holds has
+// changed: its tracks, their order, shuffle, or the index. A move to another
+// position alone needs no call (it costs a pass over the queue for nothing):
+// the position is saved in flash, by state_task_save_position, and the
+// position in the file is only what stands when flash's does not fit.
 //
 // The call compares `q` with what was handed over last and copies it only
 // if the two orders, the count, shuffle or the index differ; only then is

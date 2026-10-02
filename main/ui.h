@@ -34,8 +34,9 @@ esp_err_t ui_start(ui_queues_t *queues);
 void ui_card_waiting(bool waiting);
 
 // Stop playback, as a user of the player would want it stopped: the player
-// stops, the track stays on Now Playing as the one D starts again, and the
-// rest of the queue does not follow. For the console's `stop`. (player_stop
+// stops, the track stays on Now Playing as the one D starts (a queue track
+// from where it had got to, any other from its beginning), and the rest of
+// the queue does not follow. For the console's `stop`. (player_stop
 // alone leaves the UI believing the track is still playing: the player
 // reports no event for a stop.) Returns at once; from any task.
 void ui_stop(void);

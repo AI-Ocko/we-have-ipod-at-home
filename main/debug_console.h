@@ -18,8 +18,10 @@
 //                            told, so this pause does not save the time
 //                            reached as one made with `key D` does.
 //   stop                     ui_stop: the UI task stops the player, keeps the
-//                            track as the one D starts again, and does not
-//                            go on to the next track of the queue
+//                            track as the one D starts (a queue track from
+//                            where it had got to, a `play`ed one from its
+//                            beginning), and does not go on to the next
+//                            track of the queue
 //   vol <n>                  player_set_volume (any integer; the player clamps)
 //                            Not saved: only a volume set with the keys is.
 //   seek <signed ms>         player_seek_rel
