@@ -21,7 +21,8 @@ typedef enum {
 
 typedef struct {
   player_state_t state;
-  uint32_t position_ms; // audio handed to the DAC link so far in this track
+  uint32_t position_ms; // where in the track the audio handed to the DAC link
+                        // has got to; a seek moves it to its target
   int volume;           // 0..20
 
   // The buffer between the decoder and the output, in bytes.
@@ -29,13 +30,16 @@ typedef struct {
   size_t ring_fill;
   // The least the buffer held between first being full and the decoder
   // reaching the end of the file: the reserve left at the worst moment. -1
-  // until the buffer has been full once in this track. (At the start and the
-  // end of a track the buffer is nearly empty by design; those do not count.)
+  // until the buffer has been full once in this track, and again after a
+  // seek until it has refilled. (At the start and the end of a track, and
+  // after a seek, the buffer is nearly empty by design; those do not count.)
   int32_t ring_low;
   uint32_t underruns; // times the buffer ran dry while playing, since start-up
 
-  // The last track that played to its end: frames handed to the DAC link and
-  // the number its header promised (0 if the header does not say).
+  // The last track that played to its end: frames handed to the DAC link
+  // (what was really played, so fewer than the whole track if it was seeked
+  // forwards in and more if backwards) and the number its header promised (0
+  // if the header does not say).
   uint32_t ended_frames;
   uint32_t ended_expected;
 

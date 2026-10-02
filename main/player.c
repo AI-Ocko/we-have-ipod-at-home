@@ -12,8 +12,9 @@
 // OUTPUT TASK (priority 20, 4 KB stack). It owns the I2S link. While a stream
 // is playing it takes one block at a time from the ring into internal RAM,
 // converts it to 32-bit stereo, applies the gain and writes it to I2S; the
-// write is what paces it. It counts the frames it has handed over, which is
-// the position.
+// write is what paces it. It counts the frames it has handed over: how many
+// have been played, and where in the track that is (the two differ once the
+// track has been seeked in).
 //
 // States
 // ------
@@ -28,8 +29,10 @@
 //            shut down exactly as in STOPPED; resuming starts it again.
 //
 // Inside "playing or paused" the decoder task's track is in one of two
-// phases: decoding (the file is open and blocks are still being produced) and
-// draining (the file is finished and closed; the ring is playing out).
+// phases: decoding (blocks are still being produced from the file) and
+// draining (the file is finished; the ring is playing out). A seek puts a
+// draining track back into decoding, which is why the file and the decoder
+// stay open until the track is over. Only an error closes them early.
 //
 // Formats
 // -------
@@ -57,9 +60,9 @@
 // -------------
 // Decoder task only: `s_dec` (the track, file, decoder handle, both decoder
 //   buffers), the generation counter, posting STARTED, ENDED and ERROR.
-// Output task only: `out_t` (its state, the gain, the frame count), the two
+// Output task only: `out_t` (its state, the gain, the frame counts), the two
 //   block buffers `s_out_raw` and `s_out_pcm`, every audio_out_* call,
-//   posting POSITION, resetting the ring.
+//   posting POSITION, emptying the ring.
 // The ring: written only by the decoder task, read only by the output task.
 // The path of the current track: written by the decoder task, copied out by
 //   player_get_path(); a mutex guards it, held only for a pointer swap or a
@@ -71,11 +74,14 @@
 // Messages
 // --------
 // Callers ──► decoder task (`s_cmd_q`, 8 deep, never waited on by the sender):
-//   PLAY(path)   stop what is playing, open the file, start decoding
+//   PLAY(path, start)
+//                stop what is playing, open the file, start decoding; a
+//                start other than 0 is a seek to there before anything sounds
 //   PAUSE        playing -> paused; otherwise ignored
 //   RESUME       paused -> playing; otherwise ignored
 //   STOP         stop what is playing, go idle
-//   SEEK         ignored until Task 8
+//   SEEK(ms)     move that far forwards or backwards in the track; ignored
+//                when idle or when the track's length is not known
 //   STALL(ms)    test aid: the decoder task does nothing for that long
 // Volume is not a message: player_set_volume() stores the level in a shared
 // word and the output task reads it once per block, so it takes effect in the
@@ -90,7 +96,9 @@
 //
 // Decoder task ──► output task (`s_out_q`, 8 deep):
 //   START(gen, rate, format, channels, paused, eos)
-//                a new stream is in the ring; play it (or hold it, if paused)
+//                a new stream is in the ring; play it (or hold it, if paused).
+//                "Stream" is what the output task plays between two STARTs: a
+//                track from its start, or from the place a seek went to.
 //   EOS(gen)     the last block of the stream is in the ring
 //   PAUSE        fade out and hold
 //   RESUME       fade in and continue
@@ -112,12 +120,38 @@
 // resume:  decoder: state = playing, send RESUME. Output: carries on from the
 //          next frame in the ring with the gain running up from zero.
 // stop, and play while something is loaded:
-//          decoder: close the file, send FLUSH, wait for `s_flushed`. Output:
-//          fade out as for pause, reset the ring, give `s_flushed`.
+//          decoder: stop decoding, send FLUSH, wait for `s_flushed`, close
+//          the file. Output: fade out as for pause, empty the ring, give
+//          `s_flushed`.
+// seek:    decoder: each SEEK only moves a target (from the present position,
+//          or from the target of a seek not yet made). When no command is
+//          waiting, one jump is made to it: FLUSH as for stop, then reset the
+//          decoder, move the file to the byte offset in proportion to the
+//          target time, and decode on from the first whole frame found there
+//          until the ring holds 250 ms again; then START, as for play, but
+//          without a second STARTED. A FLAC decoder is first given the
+//          42-byte start of the stream again (see dec_seek). So a burst of
+//          seeks is neither queued up nor lost: they add up, and what cannot
+//          be served at once is served as one. A target before the start is
+//          the start. A target at or past the end ends the track: ENDED, as
+//          soon as the FLUSH is answered. A paused track stays paused and
+//          silent, and RESUME carries on from the new place.
+//          Output: a seek is a FLUSH and a START to it. The link keeps
+//          running in between if the START comes before its 16 blocks of
+//          silence are out (181 ms at 44.1 kHz; a seek takes 0.1 to 0.2 s),
+//          and is otherwise stopped and started as between two tracks.
+//          Either way the sound goes fade out, silence, fade in at the new
+//          place.
+// play with a start position:
+//          a seek that is asked for before the track has sounded: the first
+//          block is decoded (it tells the format), then the jump is made;
+//          STARTED and START follow once 250 ms from the new place is
+//          buffered.
 // end of track:
-//          decoder: when the file's last byte has been decoded, close the
-//          file and send EOS. Output: when fewer than a whole block is left in
-//          the ring and EOS has arrived, play what is left, then publish
+//          decoder: when the file's last byte has been decoded, stop
+//          decoding and send EOS. The file stays open until ENDED (see
+//          "States"). Output: when fewer than a whole block is left in the
+//          ring and EOS has arrived, play what is left, then publish
 //          `s_out_done = gen` and WAKE the decoder task, which posts ENDED.
 //          The output task then empties the link (16 blocks of silence push
 //          the track's last frames out of the DMA ring) before stopping it.
@@ -143,14 +177,43 @@
 // more before sleeping, so a wake-up cannot fall between the check and the
 // sleep.
 //
-// Flushing the ring safely
-// ------------------------
-// A stream buffer may only be reset while no task is blocked on it, and not
-// while the other side is in the middle of using it. Neither task ever blocks
-// on the ring: every send and receive has a zero timeout and the waiting is
-// done on the queues as described above. The reset is done by the output
-// task (the reader) while it handles FLUSH, and the decoder task (the writer)
-// is at that moment blocked on `s_flushed`, so it cannot be writing.
+// Emptying the ring
+// -----------------
+// Neither task ever blocks on the ring: every send and receive has a zero
+// timeout and the waiting is done on the queues as described above. On FLUSH
+// the output task (the reader) empties the ring by reading it out; the
+// decoder task (the writer) is at that moment blocked on `s_flushed`, so
+// nothing is added behind the reader's back and the ring is empty when the
+// answer is given.
+//
+// It is read out, and not reset with xStreamBufferReset(), because with
+// FreeRTOS's assertions compiled in that call also overwrites the whole
+// buffer, inside a critical section: 105 ms with interrupts off on this core
+// (measured), during which the I2S interrupt cannot take back and clear the
+// buffers it has sent. Reading out a full ring takes 57 ms with interrupts
+// on, and less the emptier it is.
+//
+// Played and position
+// -------------------
+// The output task keeps two counts. `frames` is what it has handed to the
+// link in this track: it only ever grows, and ENDED reports it ("frames
+// really played", fade-outs included). `position` is where in the track the
+// next frame belongs: it advances with `frames` and a seek moves it to the
+// target. POSITION events and the reported position come from it; after a
+// seek the next POSITION is the next whole 500 ms after the target.
+//
+// A seek lands on the first whole frame after a byte offset that is in
+// proportion to the time, so from then on the position is only as true as
+// the file's bit rate is even: to a frame or two for a constant bit rate;
+// within 4 s on the 305 s FLAC music track it was measured on; and on the
+// test file built to be the worst case (5 s of loud noise, then 15 s of near
+// silence) a seek aimed at 12 s lands at 3.5 s. The position can then run on
+// past the track's length before ENDED.
+//
+// Both are published in shared words. While the output task has no stream
+// (between a FLUSH answered and the next START) those words belong to the
+// decoder task, which resets them for a new track and moves the position for
+// a seek; the output task takes its counts from them at START.
 //
 // Whole frames, whole blocks
 // --------------------------
@@ -162,14 +225,16 @@
 //
 // Generations
 // -----------
-// Each `play` gets a new generation number. `s_out_done` and `s_out_failed`
-// hold the generation they refer to, so a late report about a stream that has
-// since been replaced is not mistaken for news of the current one.
+// Each stream (each `play`, and each seek that is made) gets a new
+// generation number. `s_out_done` and `s_out_failed` hold the generation they
+// refer to, so a late report about a stream that has since been replaced is
+// not mistaken for news of the current one.
 //
 // Not in the audio loops: logging, allocation (buffers are made at start-up;
 // the decoder's output buffer is replaced only if a block does not fit),
-// floating point, per-sample division or calls. STARTED, POSITION, ENDED and
-// ERROR are logged by whoever reads the events.
+// floating point, per-sample division or calls. A seek allocates nothing
+// either. STARTED, POSITION, ENDED and ERROR are logged by whoever reads the
+// events.
 
 #include "player.h"
 
@@ -244,8 +309,9 @@ typedef enum {
 
 typedef struct {
   cmd_type_t type;
-  char *path; // CMD_PLAY: heap copy, owned by whoever holds the message
-  int32_t ms; // PLAY: start position; SEEK: distance; STALL: how long
+  char *path;        // PLAY: heap copy, owned by whoever holds the message
+  uint32_t start_ms; // PLAY: where in the track to start
+  int32_t ms;        // SEEK: distance; STALL: how long
 } cmd_t;
 
 typedef enum {
@@ -314,11 +380,12 @@ static atomic_uint s_dec_need;
 // task swaps it back to 0 when it sends the WAKE.
 static atomic_uint s_out_starving;
 
-// Writer: output task while it has a stream. The decoder task resets these
-// when it opens a track, which is after a FLUSH has been answered or the
-// stream has finished: the output task has no stream then and leaves them
-// alone until the next START.
-static atomic_uint s_frames_played;
+// Writer: output task while it has a stream. When it has none (a FLUSH has
+// been answered or the stream has finished) they are the decoder task's: it
+// resets them when it opens a track and moves `s_position` when it seeks. The
+// output task takes its counts from them again at the next START.
+static atomic_uint s_frames_played; // handed to the link in this track
+static atomic_uint s_position;      // where in the track that is, in frames
 static atomic_uint s_ring_low;
 static atomic_uint s_out_busy_us;
 
@@ -442,7 +509,8 @@ typedef struct {
   bool waiting; // nothing to do until a message arrives
   int32_t gain; // where the last block written left the gain (Q15)
 
-  uint32_t frames; // of this stream handed to I2S
+  uint32_t frames;   // of this track handed to I2S: what was really played
+  uint32_t position; // where in the track the next frame is; a seek moves it
   uint32_t next_position_ms;
   uint32_t next_position_frames;
   uint32_t busy_us;
@@ -553,9 +621,11 @@ static bool out_write(out_t *o, size_t frames) {
   o->last_write_us = esp_timer_get_time();
   o->silence_owed = AUDIO_OUT_BLOCKS;
   o->frames += frames;
+  o->position += frames;
   atomic_store(&s_frames_played, o->frames);
+  atomic_store(&s_position, o->position);
 
-  if (o->frames >= o->next_position_frames) {
+  if (o->position >= o->next_position_frames) {
     const player_event_t event = {
         .type = PLAYER_EVENT_POSITION,
         .position_ms = o->next_position_ms,
@@ -672,11 +742,18 @@ static void out_handle(out_t *o, const omsg_t *m) {
     o->eos = m->eos;
     o->starved = false;
     o->gain = 0; // fade in
-    o->frames = 0;
-    o->busy_us = 0;
-    o->next_position_ms = POSITION_INTERVAL_MS;
+    // Carry on counting where the decoder task says the track is: all zero
+    // for a new track; after a seek, what was played before it and the place
+    // it went to. The next POSITION is the next whole interval after that.
+    o->frames = atomic_load(&s_frames_played);
+    o->position = atomic_load(&s_position);
+    o->busy_us = atomic_load(&s_out_busy_us);
+    o->next_position_ms = ((uint32_t)((uint64_t)o->position * 1000 / m->rate) /
+                               POSITION_INTERVAL_MS +
+                           1) *
+                          POSITION_INTERVAL_MS;
     o->next_position_frames =
-        (uint32_t)((uint64_t)POSITION_INTERVAL_MS * m->rate / 1000);
+        (uint32_t)((uint64_t)o->next_position_ms * m->rate / 1000);
     o->state = m->paused ? OUT_PAUSED : OUT_PLAYING;
     break;
 
@@ -706,9 +783,11 @@ static void out_handle(out_t *o, const omsg_t *m) {
     if (o->state == OUT_PLAYING) {
       out_fade_out(o);
     }
-    // Safe: no task ever blocks on the ring, and the writer is waiting for
-    // s_flushed.
-    xStreamBufferReset(s_ring);
+    // Read the ring out until it is empty; the writer is waiting for
+    // s_flushed, so nothing is added meanwhile. (Not xStreamBufferReset: see
+    // "Emptying the ring" at the top.)
+    while (xStreamBufferReceive(s_ring, s_out_raw, sizeof(s_out_raw), 0) > 0) {
+    }
     atomic_store(&s_out_starving, 0);
     o->state = OUT_STOPPED;
     o->eos = false;
@@ -746,12 +825,24 @@ static void output_task(void *arg) {
 // Decoder task
 // ============================================================================
 
+// The start of a FLAC stream: the "fLaC" marker and the STREAMINFO block.
+#define FLAC_HEAD_BYTES 42
+#define FLAC_HEAD_LAST_FLAG_AT 4 // the block header's "last block" bit
+#define FLAC_HEAD_LAST_FLAG 0x80
+
 typedef struct {
   bool active;      // a track is loaded: the player is playing or paused
-  bool decoding;    // its file is open and still being decoded
-  bool out_started; // START has been sent for it
+  bool decoding;    // blocks are still being produced from its file
+  bool out_started; // START has been sent for what is in the ring
+  bool announced;   // STARTED has been posted for it
+  bool jumped;      // it has been seeked in
   bool paused;
   uint32_t gen;
+
+  // A seek that has been asked for and not yet made. Seeks that arrive
+  // before it is made move the target; one jump serves them all.
+  bool seek_wanted;
+  uint32_t seek_to_ms;
 
   FILE *file;
   uint32_t file_left; // bytes not yet read
@@ -761,6 +852,11 @@ typedef struct {
   uint32_t audio_end;
   esp_audio_simple_dec_type_t type; // FLAC or MP3, by the file's extension
   esp_audio_simple_dec_handle_t dec;
+  // FLAC: what the decoder is given again after a seek, in place of the
+  // file's whole header (see dec_seek). Marked as the stream's last metadata
+  // block, so audio may follow it directly.
+  bool flac_head_ok;
+  uint8_t flac_head[FLAC_HEAD_BYTES];
   esp_audio_simple_dec_raw_t raw; // the input not yet consumed
 
   // Known from the first decoded block on.
@@ -773,7 +869,7 @@ typedef struct {
   uint32_t prefill_bytes;
 
   uint32_t pending;  // bytes at the start of `out` waiting for room in the ring
-  uint32_t sent;     // bytes put in the ring so far
+  uint32_t sent;     // bytes put in the ring since it was last emptied
   uint32_t expected; // frames, from the file's header; 0 if it does not say
   uint32_t duration_ms; // 0 if unknown
   int end_error;        // what to report when the ring has played out
@@ -793,6 +889,15 @@ static void out_send(omsg_type_t type) {
   xQueueSend(s_out_q, &m, portMAX_DELAY);
 }
 
+// No more blocks will be produced (until a seek says otherwise).
+static void dec_stop_decoding(void) {
+  dec_t *d = &s_dec;
+  d->decoding = false;
+  d->pending = 0;
+  d->raw.len = 0;
+  atomic_store(&s_dec_need, 0);
+}
+
 static void dec_close_source(void) {
   dec_t *d = &s_dec;
   if (d->dec) {
@@ -803,16 +908,15 @@ static void dec_close_source(void) {
     fclose(d->file);
     d->file = NULL;
   }
-  d->decoding = false;
-  d->pending = 0;
-  d->raw.len = 0;
-  atomic_store(&s_dec_need, 0);
+  dec_stop_decoding();
 }
 
-// The track is over, however it ended. Back to idle.
+// The track is over, however it ended. Back to idle, with nothing open.
 static void dec_unload(void) {
+  dec_close_source();
   s_dec.active = false;
   s_dec.paused = false;
+  s_dec.seek_wanted = false;
   atomic_store(&s_track_end_ms, now_ms() | 1); // never 0: 0 means "loaded"
   atomic_store(&s_loaded, 0);
 }
@@ -828,28 +932,57 @@ static void dec_stop_track(void) {
   if (!s_dec.active) {
     return;
   }
-  dec_close_source();
+  dec_stop_decoding();
   // Always through the output task, even if it was never given this stream:
-  // the ring may hold the start of it, and only the output task resets the
+  // the ring may hold the start of it, and only the output task empties the
   // ring.
   out_send(OMSG_FLUSH);
   xSemaphoreTake(s_flushed, portMAX_DELAY);
   dec_unload();
 }
 
-// Hand the stream in the ring to the output task and announce the track.
+// The track is over and nothing of it is left to play: report how it ended
+// (`error` is NO_ERROR for "played to its end") and go idle. The output task
+// has no stream at this point, so the frame counts are final.
+static void dec_report_end(int error) {
+  dec_t *d = &s_dec;
+  if (error == NO_ERROR) {
+    uint32_t frames = atomic_load(&s_frames_played);
+    atomic_store(&s_ended_frames, frames);
+    atomic_store(&s_ended_expected, d->expected);
+    const player_event_t event = {
+        .type = PLAYER_EVENT_ENDED,
+        .position_ms =
+            (uint32_t)((uint64_t)atomic_load(&s_position) * 1000 / d->rate),
+        .duration_ms = d->duration_ms,
+        .sample_rate = d->rate,
+        .bits = d->bits,
+        .channels = d->channels,
+    };
+    post_event(&event);
+  } else {
+    dec_post_error((player_error_t)error);
+  }
+  dec_unload();
+}
+
+// Hand the stream in the ring to the output task and, if this is the start
+// of the track and not the place a seek went to, announce the track.
 static void dec_start_output(bool eos) {
   dec_t *d = &s_dec;
   d->out_started = true;
 
-  const player_event_t event = {
-      .type = PLAYER_EVENT_STARTED,
-      .duration_ms = d->duration_ms,
-      .sample_rate = d->rate,
-      .bits = d->bits,
-      .channels = d->channels,
-  };
-  post_event(&event);
+  if (!d->announced) {
+    d->announced = true;
+    const player_event_t event = {
+        .type = PLAYER_EVENT_STARTED,
+        .duration_ms = d->duration_ms,
+        .sample_rate = d->rate,
+        .bits = d->bits,
+        .channels = d->channels,
+    };
+    post_event(&event);
+  }
 
   const omsg_t m = {
       .type = OMSG_START,
@@ -867,13 +1000,21 @@ static void dec_start_output(bool eos) {
 // wrong. What is already in the ring is still played.
 static void dec_finish(int error) {
   dec_t *d = &s_dec;
-  dec_close_source();
+  if (error == NO_ERROR) {
+    // The file and the decoder stay open until the ring has played out, so
+    // that a seek back from the track's last seconds can still be served.
+    dec_stop_decoding();
+  } else {
+    dec_close_source();
+  }
   if (d->sent == 0) {
-    // Nothing was ever buffered, so there is nothing to play out. A file
-    // that decodes to no audio at all counts as undecodable.
-    dec_post_error(error == NO_ERROR ? PLAYER_ERROR_DECODE
-                                     : (player_error_t)error);
-    dec_unload();
+    // Nothing is in the ring, so there is nothing to play out. A file that
+    // decodes to no audio at all counts as undecodable; a seek that landed
+    // after the last whole block of the track simply ends it.
+    if (error == NO_ERROR && !d->jumped) {
+      error = PLAYER_ERROR_DECODE;
+    }
+    dec_report_end(error);
     return;
   }
   d->end_error = error;
@@ -897,23 +1038,7 @@ static void dec_check_output(void) {
     return;
   }
   if (!d->decoding && atomic_load(&s_out_done) == d->gen) {
-    uint32_t frames = atomic_load(&s_frames_played);
-    if (d->end_error == NO_ERROR) {
-      atomic_store(&s_ended_frames, frames);
-      atomic_store(&s_ended_expected, d->expected);
-      const player_event_t event = {
-          .type = PLAYER_EVENT_ENDED,
-          .position_ms = (uint32_t)((uint64_t)frames * 1000 / d->rate),
-          .duration_ms = d->duration_ms,
-          .sample_rate = d->rate,
-          .bits = d->bits,
-          .channels = d->channels,
-      };
-      post_event(&event);
-    } else {
-      dec_post_error((player_error_t)d->end_error);
-    }
-    dec_unload();
+    dec_report_end(d->end_error);
   }
 }
 
@@ -944,6 +1069,23 @@ static int dec_prepare_flac(uint32_t size) {
   d->duration_ms = d->expected ? flac_header_duration_ms(&header) : 0;
   d->audio_start = (uint32_t)header.audio_start;
   d->audio_end = size;
+
+  // Keep the start of the stream for seeking (see dec_seek). It is at the
+  // start of the file, or after an ID3v2 tag in the unusual file that has
+  // one. If it is not found there the file still plays; it cannot be seeked.
+  uint8_t tag[ID3V2_HEADER_BYTES];
+  uint32_t stream_start = 0;
+  if (fseek(d->file, 0, SEEK_SET) != 0) {
+    return PLAYER_ERROR_IO;
+  }
+  if (fread(tag, 1, sizeof(tag), d->file) == sizeof(tag)) {
+    stream_start = id3v2_tag_bytes(tag);
+  }
+  d->flac_head_ok =
+      fseek(d->file, (long)stream_start, SEEK_SET) == 0 &&
+      fread(d->flac_head, 1, FLAC_HEAD_BYTES, d->file) == FLAC_HEAD_BYTES &&
+      memcmp(d->flac_head, "fLaC", 4) == 0;
+  d->flac_head[FLAC_HEAD_LAST_FLAG_AT] |= FLAC_HEAD_LAST_FLAG;
 
   // The decoder parses the file from its first byte, header included.
   if (fseek(d->file, 0, SEEK_SET) != 0) {
@@ -1069,7 +1211,7 @@ static int dec_open(const char *path) {
 }
 
 // The PLAY command. Takes ownership of `path`.
-static void dec_play(char *path) {
+static void dec_play(char *path, uint32_t start_ms) {
   dec_t *d = &s_dec;
   dec_stop_track();
 
@@ -1080,6 +1222,8 @@ static void dec_play(char *path) {
 
   d->gen = ++d->gen_counter;
   d->out_started = false;
+  d->announced = false;
+  d->jumped = false;
   d->paused = false;
   d->format_known = false;
   d->pending = 0;
@@ -1090,6 +1234,7 @@ static void dec_play(char *path) {
 
   // The output task has no stream now, so its counters are ours to reset.
   atomic_store(&s_frames_played, 0);
+  atomic_store(&s_position, 0);
   atomic_store(&s_ring_low, RING_BYTES);
   atomic_store(&s_out_busy_us, 0);
   atomic_store(&s_ring_tracked, 0);
@@ -1106,6 +1251,111 @@ static void dec_play(char *path) {
     dec_post_error((player_error_t)error);
     dec_unload();
     return;
+  }
+  d->decoding = true;
+  // Starting part-way in is a seek like any other, made when the first block
+  // has shown the stream's format.
+  if (start_ms > 0) {
+    d->seek_wanted = true;
+    d->seek_to_ms = start_ms;
+  }
+}
+
+// The SEEK command: move the target by `delta_ms`. The jump itself is made
+// by dec_seek() once every waiting command has been taken, so a burst of
+// seeks costs one jump to where they add up to.
+static void dec_seek_by(int32_t delta_ms) {
+  dec_t *d = &s_dec;
+  if (!d->active) {
+    return; // idle: ignored
+  }
+  // From where the last seek is going if it has not been made yet; otherwise
+  // from what has been handed to the link, which a seek that has been made
+  // and not yet heard has already moved.
+  int64_t from = d->seek_to_ms;
+  if (!d->seek_wanted) {
+    from = d->format_known
+               ? (int64_t)((uint64_t)atomic_load(&s_position) * 1000 / d->rate)
+               : 0;
+  }
+  int64_t target = from + delta_ms;
+  if (target < 0) {
+    target = 0; // before the start: the start
+  } else if (target > UINT32_MAX) {
+    target = UINT32_MAX;
+  }
+  d->seek_to_ms = (uint32_t)target;
+  d->seek_wanted = true;
+}
+
+// Is there a seek to make now? It waits for the first block, which is what
+// tells the stream's format (and the length of an MP3 without a Xing header).
+static bool dec_seek_due(void) {
+  dec_t *d = &s_dec;
+  return d->seek_wanted && (d->format_known || !d->decoding);
+}
+
+// Make the seek that was asked for: silence the output, empty the ring, and
+// start decoding again at the byte offset that corresponds to the target
+// time. The offset is proportional (exact only for a constant bit rate), and
+// the decoder carries on from the first whole frame it finds after it, so
+// the place is approximate; the position is reported as the target.
+static void dec_seek(void) {
+  dec_t *d = &s_dec;
+  d->seek_wanted = false;
+  // Ignored: a length that is not known, a FLAC whose head was not found,
+  // or a track whose file was closed by an error and is only playing out.
+  if (!d->dec || !d->format_known || d->duration_ms == 0 ||
+      (d->type == ESP_AUDIO_SIMPLE_DEC_TYPE_FLAC && !d->flac_head_ok)) {
+    return;
+  }
+  uint32_t target_ms = d->seek_to_ms;
+
+  // Fade out and throw away what is buffered, as for stop. From the answer
+  // until the next START the output task has no stream, so the ring and the
+  // position are ours.
+  dec_stop_decoding();
+  out_send(OMSG_FLUSH);
+  xSemaphoreTake(s_flushed, portMAX_DELAY);
+  // What follows is a new stream to the output task: anything it has still
+  // to say about the old one (played out, link failed) must not be taken for
+  // news of this one.
+  d->gen = ++d->gen_counter;
+  d->out_started = false;
+  d->jumped = true;
+  d->sent = 0;
+  d->end_error = NO_ERROR;
+  atomic_store(&s_ring_tracked, 0); // the reserve is rebuilt from nothing
+
+  if (target_ms >= d->duration_ms) {
+    dec_report_end(NO_ERROR); // at or past the end: the track is over
+    return;
+  }
+  uint32_t offset =
+      d->audio_start + (uint32_t)((uint64_t)(d->audio_end - d->audio_start) *
+                                  target_ms / d->duration_ms);
+  if (esp_audio_simple_dec_reset(d->dec) != ESP_AUDIO_ERR_OK) {
+    dec_report_end(PLAYER_ERROR_DECODE);
+    return;
+  }
+  if (fseek(d->file, (long)offset, SEEK_SET) != 0) {
+    dec_report_end(PLAYER_ERROR_IO);
+    return;
+  }
+  d->file_left = d->audio_end - offset;
+  atomic_store(&s_position, (uint32_t)((uint64_t)target_ms * d->rate / 1000));
+
+  if (d->type == ESP_AUDIO_SIMPLE_DEC_TYPE_FLAC) {
+    // After a reset the FLAC parser must be shown the start of a stream
+    // again before it accepts frames. It does not need the file's own
+    // header for that (tags, seek table, padding, perhaps a cover picture
+    // of hundreds of kilobytes, all of which would have to be read from the
+    // card again): the marker and the STREAMINFO block are enough, 42 bytes
+    // kept from when the file was opened. They are the next input; the file
+    // follows from `offset`.
+    d->raw.buffer = d->flac_head;
+    d->raw.len = FLAC_HEAD_BYTES;
+    d->raw.eos = false;
   }
   d->decoding = true;
 }
@@ -1283,7 +1533,7 @@ static void dec_handle(cmd_t *c) {
   dec_t *d = &s_dec;
   switch (c->type) {
   case CMD_PLAY:
-    dec_play(c->path); // start position: Task 8
+    dec_play(c->path, c->start_ms);
     break;
 
   case CMD_PAUSE:
@@ -1314,7 +1564,10 @@ static void dec_handle(cmd_t *c) {
     vTaskDelay(pdMS_TO_TICKS(c->ms));
     break;
 
-  case CMD_SEEK: // Task 8
+  case CMD_SEEK:
+    dec_seek_by(c->ms);
+    break;
+
   case CMD_WAKE:
     break;
   }
@@ -1338,7 +1591,12 @@ static void decoder_task(void *arg) {
     dec_check_output();
 
     int64_t t0 = esp_timer_get_time();
-    busy = dec_step();
+    if (dec_seek_due()) {
+      dec_seek();
+      busy = true;
+    } else {
+      busy = dec_step();
+    }
     if (busy) {
       d->busy_us += (uint32_t)(esp_timer_get_time() - t0);
       atomic_store(&s_dec_busy_us, d->busy_us);
@@ -1412,7 +1670,7 @@ esp_err_t player_play(const char *path, uint32_t start_ms) {
   if (!path || path[0] == '\0') {
     return ESP_ERR_INVALID_ARG;
   }
-  cmd_t c = {.type = CMD_PLAY, .path = strdup(path), .ms = (int32_t)start_ms};
+  cmd_t c = {.type = CMD_PLAY, .path = strdup(path), .start_ms = start_ms};
   if (!c.path) {
     return ESP_ERR_NO_MEM;
   }
@@ -1473,7 +1731,7 @@ void player_get_status(player_status_t *out) {
   uint32_t rate = atomic_load(&s_rate);
   if (rate != 0) {
     out->position_ms =
-        (uint32_t)((uint64_t)atomic_load(&s_frames_played) * 1000 / rate);
+        (uint32_t)((uint64_t)atomic_load(&s_position) * 1000 / rate);
   }
   out->ring_size = RING_BYTES;
   out->ring_fill = s_ring ? xStreamBufferBytesAvailable(s_ring) : 0;
