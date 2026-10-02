@@ -38,6 +38,7 @@ add_library(dap_core STATIC
   ${CORE_DIR}/marquee.c
   ${CORE_DIR}/tags.c
   ${CORE_DIR}/library.c
+  ${CORE_DIR}/menu.c
 )
 target_include_directories(dap_core PUBLIC ${CORE_DIR})
 
@@ -68,6 +69,7 @@ dap_test(test_mp3_xing)
 dap_test(test_marquee)
 dap_test(test_tags)
 dap_test(test_library)
+dap_test(test_menu)
 # The FLAC files made by tools/make_test_audio.sh.
 target_compile_definitions(test_flac_header PRIVATE
   FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures")
