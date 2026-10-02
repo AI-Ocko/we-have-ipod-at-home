@@ -26,6 +26,7 @@
 #define RX_BUFFER_BYTES 1024
 #define LINE_MAX_BYTES 400 // a long path and a start position
 #define LIB_LIST_MAX 50     // lines per `lib` listing: more would flood the port
+#define QUEUE_LIST_DEFAULT 10 // lines of a `queue` that does not say how many
 #define HOLD_MAX_REPEATS 2000
 // How long `hold` waits for room in the key queue before it gives up.
 #define HOLD_ROOM_WAIT_MS 1000
@@ -268,6 +269,10 @@ static char screen_char(unsigned char cell) {
     return '+';
   case UI_GLYPH_BAR_EMPTY:
     return '-';
+  case UI_GLYPH_LOOP_ALL:
+    return 'L';
+  case UI_GLYPH_LOOP_ONE:
+    return '1';
   default:
     return (cell < 0x20 || cell > 0x7e) ? '?' : (char)cell;
   }
@@ -460,6 +465,44 @@ static const char *cmd_lib(char *args) {
   return why;
 }
 
+// `queue [from [count]]`: the lines printed are in debug_console.h.
+static const char *cmd_queue(char *args) {
+  uint32_t n[2] = {UINT32_MAX, QUEUE_LIST_DEFAULT};
+  if (parse_numbers(args, n, 2) < 0) {
+    return "expected: queue [from [count]]";
+  }
+  // Static: one task uses it, and it need not be on its stack.
+  static ui_queue_report_t r;
+  if (!ui_queue_report(n[0], n[1], &r)) {
+    return "the UI task did not answer";
+  }
+  ESP_LOGI(TAG,
+           "queue count=%" PRIu32 " position=%" PRIu32 " shuffle=%d loop=%d "
+           "index=%08" PRIx32,
+           r.count, r.position, (int)r.shuffle, (int)r.loop, r.index);
+  // The numbers are the UI's and the paths the library's. They go together
+  // only if the index now loaded is the one the queue was built for.
+  const library_t *lib = library_task_get();
+  bool same = lib != NULL && library_checksum(lib) == r.index;
+  for (uint32_t i = 0; i < r.listed; i++) {
+    s_path[0] = '\0';
+    if (same) {
+      library_track_path(lib, r.tracks[i], s_path, sizeof(s_path));
+    }
+    ESP_LOGI(TAG, "queue %" PRIu32 " track=%u path=\"%s\"", r.from + i,
+             (unsigned)r.tracks[i], same ? s_path : "?");
+  }
+  if (lib != NULL) {
+    library_task_put();
+  }
+  ESP_LOGI(TAG, "queue listed=%" PRIu32 " from=%" PRIu32 " of=%" PRIu32 "%s",
+           r.listed, r.from, r.count,
+           (n[1] > UI_QUEUE_REPORT_MAX && r.listed == UI_QUEUE_REPORT_MAX)
+               ? " capped"
+               : "");
+  return NULL;
+}
+
 // A saved value, or `-` for one that is not saved.
 static const char *saved(bool has, uint32_t value, char *text, size_t size) {
   if (!has) {
@@ -570,6 +613,8 @@ static void run_line(const char *line) {
     why = cmd_lib(args);
   } else if (strcmp(word, "state") == 0) {
     why = cmd_state(args);
+  } else if (strcmp(word, "queue") == 0) {
+    why = cmd_queue(args);
   } else {
     why = "unknown command";
   }

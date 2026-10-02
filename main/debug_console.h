@@ -11,11 +11,15 @@
 // `err <line>: <why>`. A line ends with LF, CR or CRLF.
 //
 //   play <path> [start_ms]   player_play. Also logs `play id=<n>`: the play
-//                            number the track's events will carry.
-//   pause | resume           player_pause / player_resume
+//                            number the track's events will carry. The
+//                            track is not put in the play queue, and nothing
+//                            follows it when it ends.
+//   pause | resume           player_pause / player_resume. The UI is not
+//                            told, so this pause does not save the time
+//                            reached as one made with `key D` does.
 //   stop                     ui_stop: the UI task stops the player, keeps the
 //                            track as the one D starts again, and does not
-//                            go on to the next track of its list
+//                            go on to the next track of the queue
 //   vol <n>                  player_set_volume (any integer; the player clamps)
 //                            Not saved: only a volume set with the keys is.
 //   seek <signed ms>         player_seek_rel
@@ -32,12 +36,15 @@
 //                            row in quotes: `screen "<16 chars>" "<16 chars>"`.
 //                            The UI's user-defined characters (ui.h) are
 //                            printed as stand-ins: `>` play (also the key
-//                            test's triangle), `=` pause, and `#` `+` `-` a
+//                            test's triangle), `=` pause, `#` `+` `-` a
 //                            full, a half and an empty cell of the volume
-//                            bar. Anything else that is not printable ASCII
-//                            is shown as `?`. (A list's cursor is a real
-//                            `>`: it is followed at once by the item, the
-//                            play symbol by a space.)
+//                            bar, and in the last column of Now Playing's
+//                            bottom row `L` the loop-all mark and `1` the
+//                            loop-one mark. Anything else that is not
+//                            printable ASCII is shown as `?`. (A list's
+//                            cursor is a real `>`: it is followed at once
+//                            by the item, the play symbol by a space. The
+//                            shuffle mark is a real `S`.)
 //   scan                     start a scan of the card (library_task_rescan).
 //                            `ok` means it has started; its progress and
 //                            result are logged under the tag `library`.
@@ -47,6 +54,7 @@
 //                            in flash, the queue file on the card. What the
 //                            running player holds is not changed, and is
 //                            saved again when it next changes.
+//   queue [from [count]]     what the play queue holds; see below.
 //
 // THE `lib` COMMANDS
 //
@@ -108,6 +116,33 @@
 //
 // Both commands wait for the state task, which may be in the middle of a
 // save: up to a second or so.
+//
+// THE `queue` COMMAND
+//
+// `queue [from [count]]` prints the play queue as the UI task holds it at
+// that moment (ui_queue_report), in exactly these forms:
+//
+//   queue count=<n> position=<n> shuffle=<0|1> loop=<0|1|2> index=<8 hex>
+//   queue <place> track=<#> path="<path>"        one line per track listed
+//   queue listed=<n> from=<place> of=<count>[ capped]
+//
+// `count` is how many tracks the queue has and `position` the current
+// track's place in the play order, counting from 0 (0 for an empty queue).
+// `loop` is 0 off, 1 all, 2 one. `index` is the checksum of the library
+// index the queue's track numbers belong to (compare `loaded_index` of
+// `state`).
+//
+// The tracks are listed in play order, which is the order they will play in
+// (shuffled, if shuffle is on), from place <from>; with no <from>, from the
+// current track, so that the first line is the track on Now Playing and
+// the ones after it are what follows. <count> is how many to list: 10 if
+// left out, at most 50 (`capped` says the limit of 50 is what ended the
+// listing), so a longer queue is read in pieces. <#> is the track's number
+// in the index, as in the `lib` lines, and `path` is in the same form as
+// theirs; it is `?` if the index now loaded is not the queue's.
+//
+// The command waits for the UI task, which answers at the end of its next
+// pass: `err queue: the UI task did not answer` after a second without one.
 //
 // The path of `play` is everything after the command word, spaces included,
 // with spaces at either end removed. If the last word of the line is made of
