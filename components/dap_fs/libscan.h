@@ -26,6 +26,11 @@ typedef bool (*libscan_progress_fn)(void *ctx, const libscan_stats_t *stats);
 // start with '.' and "System Volume Information". Returns false if `root`
 // cannot be opened or the scan was abandoned.
 //
+// Files whose names start with '.' are passed over too, as if they were not
+// there: they are not opened and not counted. (macOS writes a "._Name.flac"
+// beside every "Name.flac" it copies to a FAT card; it has the extension
+// and is not music.)
+//
 // What goes into the index:
 // - The path is relative to `root`, with '/' between its parts and none at
 //   the start: `root`, a '/' and the path open the file. LIBSCAN_PATH_MAX

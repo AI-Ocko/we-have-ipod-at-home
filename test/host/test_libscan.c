@@ -545,6 +545,34 @@ void test_dot_folders_are_skipped_at_any_depth(void) {
   TEST_ASSERT_TRUE(library_find_path(lib, "music/Not.hidden/keep.flac", NULL));
 }
 
+void test_dot_files_are_skipped(void) {
+  // macOS leaves a "._Name" companion beside each file it copies to a FAT
+  // card. It has the music file's extension and is not music.
+  tmp_begin();
+  tmp_file("Song.flac");
+  tmp_file("._Song.flac");
+  tmp_file(".hidden.mp3");
+  tmp_file(".flac");
+  tmp_dir("album");
+  tmp_file("album/Other.mp3");
+  tmp_file("album/._Other.mp3");
+  // One that could not even be opened: still not counted, because it is
+  // never tried.
+  TEST_ASSERT_EQUAL_INT(0, symlink("/nonexistent/nowhere.flac",
+                                   tmp_join("album/._gone.flac")));
+  scan_tmp();
+  TEST_ASSERT_EQUAL_UINT32(2, stats.tracks);
+  TEST_ASSERT_EQUAL_UINT32(0, stats.unreadable);
+  TEST_ASSERT_EQUAL_UINT32(0, stats.skipped);
+  TEST_ASSERT_EQUAL_UINT32(2, library_track_count(lib));
+  TEST_ASSERT_TRUE(library_find_path(lib, "Song.flac", NULL));
+  TEST_ASSERT_TRUE(library_find_path(lib, "album/Other.mp3", NULL));
+  TEST_ASSERT_FALSE(library_find_path(lib, "._Song.flac", NULL));
+  TEST_ASSERT_FALSE(library_find_path(lib, ".hidden.mp3", NULL));
+  TEST_ASSERT_FALSE(library_find_path(lib, ".flac", NULL));
+  TEST_ASSERT_FALSE(library_find_path(lib, "album/._Other.mp3", NULL));
+}
+
 void test_an_empty_tree_is_an_empty_library(void) {
   tmp_begin();
   tmp_dir("nothing");
@@ -695,6 +723,7 @@ int main(void) {
   RUN_TEST(test_paths_too_long_are_skipped_and_counted_never_cut);
   RUN_TEST(test_extensions_match_in_any_case);
   RUN_TEST(test_dot_folders_are_skipped_at_any_depth);
+  RUN_TEST(test_dot_files_are_skipped);
   RUN_TEST(test_an_empty_tree_is_an_empty_library);
   RUN_TEST(test_progress_is_called_once_for_each_track);
   RUN_TEST(test_progress_can_abandon_the_scan);

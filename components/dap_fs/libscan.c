@@ -27,7 +27,7 @@
 //   system.
 // - The name is tested before anything is opened: an entry that is not a
 //   folder and has no music extension costs nothing beyond having been
-//   listed.
+//   listed. Nor does anything whose name starts with a dot.
 // - Each music file is opened once, and tags_read fetches one or two of its
 //   sectors (see tags.c). It is closed before the next entry is looked at.
 // - The file is given a buffer of exactly one sector. tags_read asks for a
@@ -118,10 +118,16 @@ static kind_t kind_from_path(const char *path) {
   return S_ISREG(st.st_mode) ? KIND_FILE : KIND_OTHER;
 }
 
-// Folders that are never entered. The first rule also covers "." and "..",
-// which some file systems list, and the player's own "/.dap".
+// Names that are passed over whatever they belong to: anything starting
+// with a dot. For folders that covers "." and "..", which some file systems
+// list, and the player's own "/.dap"; for files, the "._Name.flac"
+// companions macOS writes beside each file it copies to a FAT card, which
+// have a music extension and are not music.
+static bool name_is_hidden(const char *name) { return name[0] == '.'; }
+
+// A folder that is never entered, besides the hidden ones.
 static bool folder_is_skipped(const char *name) {
-  return name[0] == '.' || strcasecmp(name, "System Volume Information") == 0;
+  return strcasecmp(name, "System Volume Information") == 0;
 }
 
 static bool is_blank(const char *text) {
@@ -213,17 +219,16 @@ static step_t add_file(scan_t *s, const char *name, tags_format_t format) {
 // Deal with one entry of the folder being read.
 static step_t visit(scan_t *s, const struct dirent *entry) {
   const char *name = entry->d_name;
+  // Most entries are settled by their name alone.
+  if (name_is_hidden(name)) {
+    return STEP_ON;
+  }
   kind_t kind = kind_from_entry(entry);
   tags_format_t format = TAGS_FORMAT_FLAC;
   bool music = tags_format_from_name(name, &format);
-
-  // Most entries are settled by their name alone.
   if (kind == KIND_FOLDER ? folder_is_skipped(name)
                           : (kind == KIND_FILE && !music)) {
     return STEP_ON;
-  }
-  if (kind == KIND_ASK && name[0] == '.' && !music) {
-    return STEP_ON; // a folder that is skipped or a file that is not music
   }
 
   size_t len;
