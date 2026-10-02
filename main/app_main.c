@@ -1,12 +1,14 @@
 #include "audio_out.h"
 #include "debug_console.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
 #include "keypad.h"
 #include "keys.h"
 #include "lcd.h"
+#include "marquee.h"
 #include "pcm.h"
 #include "pins.h"
 #include "player.h"
@@ -27,6 +29,7 @@
 #define UI_TASK_PRIORITY 5
 #define UI_TASK_CORE 0
 #define PATH_MAX_BYTES 320
+#define TITLE_MAX_BYTES 256 // a file name on the card is at most 255 characters
 #define CARD_EVENT_QUEUE_LENGTH 2
 #define CARD_RETRY_MS 2000
 
@@ -51,7 +54,8 @@ typedef enum {
 // ---- the temporary playing screen (replaced in stage 5) ---------------------
 
 typedef struct {
-  char title[SCREEN_COLS + 1]; // file name, without folder or extension
+  char title[TITLE_MAX_BYTES]; // file name, without folder or extension
+  int64_t title_since_us;      // when the track started: the marquee's zero
   uint32_t elapsed_ms;
   uint32_t duration_ms;
   bool failed; // the last `play` ended in an error
@@ -77,8 +81,27 @@ static const char *error_name(player_error_t error) {
   return "decode";
 }
 
+// How long the title has been on show, for the marquee. Counted from the
+// clock and not from the player's position, so the title keeps moving while
+// the track is paused. (It wraps after 49 days of one track; the marquee
+// then jumps once.)
+static uint32_t ui_title_ms(const ui_t *ui) {
+  return (uint32_t)((esp_timer_get_time() - ui->title_since_us) / 1000);
+}
+
+// How long until the screen changes by itself, with no event: UINT32_MAX if
+// it never will. Only a title too long for its row does that.
+static uint32_t ui_next_change_ms(const ui_t *ui, uint32_t title_ms) {
+  if (ui->no_card) {
+    return UINT32_MAX;
+  }
+  return marquee_next_change_ms(ui->title, SCREEN_COLS, title_ms);
+}
+
+// The title, moving if it is too long, over
 // "> 0:12/4:15  V10": playing or paused, elapsed and total time, volume.
-static void ui_render(const ui_t *ui, screen_t *screen) {
+// `title_ms` is how long the title has been on show.
+static void ui_render(const ui_t *ui, uint32_t title_ms, screen_t *screen) {
   if (ui->no_card) {
     // Nothing can play without a card, so this replaces the playing screen
     // whatever else happens (a `play` from the console fails, for one).
@@ -90,7 +113,7 @@ static void ui_render(const ui_t *ui, screen_t *screen) {
   player_status_t status;
   player_get_status(&status);
 
-  screen_set_row(screen, 0, ui->title);
+  marquee_window(ui->title, SCREEN_COLS, title_ms, screen->cells[0]);
 
   char text[2 * SCREEN_COLS];
   if (ui->failed) {
@@ -149,6 +172,9 @@ static void ui_on_player_event(ui_t *ui, const player_event_t *event) {
     const char *slash = strrchr(ui->path, '/');
     translit_title(NULL, slash ? slash + 1 : ui->path, ui->title,
                    sizeof(ui->title));
+    // A new track: its title is read from the beginning. Nothing else
+    // (pause, volume, the clock) restarts the marquee.
+    ui->title_since_us = esp_timer_get_time();
     ui->elapsed_ms = 0;
     ui->duration_ms = event->duration_ms;
     ui->failed = false;
@@ -186,20 +212,47 @@ static void ui_on_player_event(ui_t *ui, const player_event_t *event) {
   }
 }
 
+// How long to sleep for a change that is `ms` away. A wait of n ticks ends
+// at the n-th tick from now, which is anything from n - 1 to n tick periods
+// away, so round up and add one: waking early would find nothing to draw and
+// have to go round again.
+static TickType_t ticks_until(uint32_t ms) {
+  if (ms == UINT32_MAX) {
+    return portMAX_DELAY;
+  }
+  return (TickType_t)((ms + portTICK_PERIOD_MS - 1) / portTICK_PERIOD_MS + 1);
+}
+
 // Owns the LCD. Sleeps until a key event, a player event or a card event
-// arrives; the queue set is what lets it wait for all of them at once.
+// arrives (the queue set is what lets it wait for all of them at once), or
+// until a moving title is due its next step, whichever comes first. With a
+// title that fits there is no such step and it sleeps until an event.
 static void ui_task(void *arg) {
   (void)arg;
   static ui_t ui; // too big for comfort on the stack
   ui.backlight = true;
-  screen_t screen;
-  screen_clear(&screen);
-  ui_render(&ui, &screen);
-  lcd_show(&screen); // does nothing useful if there is no LCD; that is fine
+  screen_t shown;        // what the LCD was last told to show
+  bool shown_ok = false; // and it took it
 
   for (;;) {
-    QueueSetMemberHandle_t ready =
-        xQueueSelectFromSet(s_ui_events, portMAX_DELAY);
+    // One reading of the clock decides both what is drawn and how long to
+    // sleep, so the sleep always ends on a window that differs from this one.
+    uint32_t title_ms = ui_title_ms(&ui);
+    screen_t wanted;
+    ui_render(&ui, title_ms, &wanted);
+    // Most events change nothing that is on the screen (a key release, a
+    // clock tick inside the same second). Comparing two screens costs
+    // nothing next to an I2C transfer. A transfer that failed is tried
+    // again whether or not anything changed; with no LCD at all that is a
+    // call that returns at once.
+    if (!shown_ok || memcmp(&wanted, &shown, sizeof(shown)) != 0) {
+      shown = wanted;
+      shown_ok = (lcd_show(&shown) == ESP_OK);
+      debug_console_note_screen(&shown);
+    }
+
+    QueueSetMemberHandle_t ready = xQueueSelectFromSet(
+        s_ui_events, ticks_until(ui_next_change_ms(&ui, title_ms)));
     if (ready == s_key_events) {
       key_event_t event;
       if (xQueueReceive(s_key_events, &event, 0) == pdTRUE) {
@@ -218,8 +271,7 @@ static void ui_task(void *arg) {
         ui.failed = false;
       }
     }
-    ui_render(&ui, &screen);
-    lcd_show(&screen);
+    // Otherwise the wait ran out: the title is due its next step.
   }
 }
 

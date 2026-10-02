@@ -24,6 +24,16 @@ static const char *TAG = "dbg";
 
 static QueueHandle_t s_key_events;
 
+// The console's copy of what the LCD shows. The UI task writes it and the
+// console task reads it, each inside a critical section that lasts one
+// 32-byte copy: neither can see the other half-way through, and the longest
+// either can be held up is that copy (well under a microsecond). A mutex
+// would do too, but the UI task could then wait behind the console task
+// while that was itself waiting for the processor.
+static portMUX_TYPE s_screen_lock = portMUX_INITIALIZER_UNLOCKED;
+static screen_t s_screen;
+static bool s_screen_known;
+
 // The line being received, and a copy that the parser may cut up. One task
 // uses them, so they need not be on its stack.
 static char s_line[LINE_MAX_BYTES];
@@ -163,6 +173,29 @@ static const char *cmd_stat(void) {
   return NULL;
 }
 
+static const char *cmd_screen(void) {
+  screen_t screen;
+  portENTER_CRITICAL(&s_screen_lock);
+  screen = s_screen;
+  bool known = s_screen_known;
+  portEXIT_CRITICAL(&s_screen_lock);
+  if (!known) {
+    return "nothing shown yet";
+  }
+
+  // The formatting and the logging are slow, so they work on the copy.
+  char rows[SCREEN_ROWS][SCREEN_COLS + 1];
+  for (int r = 0; r < SCREEN_ROWS; r++) {
+    for (int c = 0; c < SCREEN_COLS; c++) {
+      unsigned char cell = (unsigned char)screen.cells[r][c];
+      rows[r][c] = (cell < 0x20 || cell > 0x7e) ? '?' : (char)cell;
+    }
+    rows[r][SCREEN_COLS] = '\0';
+  }
+  ESP_LOGI(TAG, "screen \"%s\" \"%s\"", rows[0], rows[1]);
+  return NULL;
+}
+
 // The screen shows the player's state but is redrawn only when the UI task
 // has something to handle. A key event with no key makes it look again, so
 // that a change made from here shows up.
@@ -209,6 +242,8 @@ static void run_line(const char *line) {
     why = cmd_stall(args);
   } else if (strcmp(word, "stat") == 0 && no_args) {
     why = cmd_stat();
+  } else if (strcmp(word, "screen") == 0 && no_args) {
+    why = cmd_screen();
   } else {
     why = "unknown command";
   }
@@ -271,6 +306,13 @@ static void console_task(void *arg) {
       }
     }
   }
+}
+
+void debug_console_note_screen(const screen_t *shown) {
+  portENTER_CRITICAL(&s_screen_lock);
+  s_screen = *shown;
+  s_screen_known = true;
+  portEXIT_CRITICAL(&s_screen_lock);
 }
 
 esp_err_t debug_console_start(QueueHandle_t key_events) {

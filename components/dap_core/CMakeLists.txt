@@ -2,5 +2,5 @@
 # sources also build with the host compiler under test/host.
 idf_component_register(SRCS "translit.c" "screen.c" "keys.c" "keytest.c"
                             "flac_header.c" "pcm.c" "id3.c"
-                            "mp3_xing.c"
+                            "mp3_xing.c" "marquee.c"
                        INCLUDE_DIRS ".")
