@@ -25,6 +25,43 @@
 //                            A user-defined character (a code below 0x20) or
 //                            anything else that is not printable ASCII is
 //                            shown as `?`.
+//   scan                     start a scan of the card (library_task_rescan).
+//                            `ok` means it has started; its progress and
+//                            result are logged under the tag `library`.
+//   lib ...                  what is in the library index; see below.
+//
+// THE `lib` COMMANDS
+//
+// Each prints one line per item, tag `dbg`, in exactly these forms (text is
+// in double quotes and printed as stored; numbers are decimal):
+//
+//   lib                      lib tracks=<n> albums=<n> artists=<n> bytes=<n>
+//   lib artists [from]       artist <#> "<name>" albums=<n> tracks=<n>
+//   lib albums <artist#> [from]
+//                            album <#> "<name>" artist=<#> tracks=<n>
+//   lib tracks <album#> [from]
+//   lib songs <from> <count>
+//   lib find <path>          track <#> "<title>" artist="<artist>" album=<#>
+//                              no=<disc>.<track> ms=<length> path="<path>"
+//                            (all on one line)
+//
+// <#> is the item's number in the index: artists are numbered A to Z, albums
+// by artist then name, tracks by artist, album, disc, track number. `lib
+// songs` lists tracks in title order, A to Z over the whole library, from
+// position <from>; the other lists are in number order. `lib find` takes a
+// path as the index stores it, relative to the card and without a leading
+// slash ("music/a.flac"; letter case is ignored), and prints that track or
+// answers `err ...: not in the library`. `path` in a track line is that same
+// form: put "/sdcard/" in front of it to `play` it.
+//
+// A listing prints at most 50 items; `from` (0 if left out) is where in the
+// list to start, so a longer one is read in pieces. Every listing ends with
+//
+//   lib listed=<n> from=<from> of=<total>[ capped]
+//
+// where `capped` is there if the limit of 50 is what ended it. With no
+// library (none loaded yet, a scan is running, or the last scan failed)
+// every `lib` command answers `err lib...: no library (...)`.
 //
 // The path of `play` is everything after the command word, spaces included,
 // with spaces at either end removed. If the last word of the line is made of

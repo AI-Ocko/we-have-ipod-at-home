@@ -5,10 +5,13 @@
 #include "esp_log.h"
 #include "freertos/task.h"
 #include "keys.h"
+#include "library_task.h"
+#include "libscan.h"
 #include "player.h"
 #include "player_status.h"
 #include <ctype.h>
 #include <errno.h>
+#include <inttypes.h>
 #include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
@@ -19,6 +22,7 @@
 #define CONSOLE_TASK_CORE 0
 #define RX_BUFFER_BYTES 1024
 #define LINE_MAX_BYTES 400 // a long path and a start position
+#define LIB_LIST_MAX 50     // lines per `lib` listing: more would flood the port
 
 static const char *TAG = "dbg";
 
@@ -38,6 +42,7 @@ static bool s_screen_known;
 // uses them, so they need not be on its stack.
 static char s_line[LINE_MAX_BYTES];
 static char s_work[LINE_MAX_BYTES];
+static char s_path[LIBSCAN_PATH_MAX]; // a track's path, for the `lib` lines
 
 static char *skip_spaces(char *s) {
   while (*s == ' ' || *s == '\t') {
@@ -196,6 +201,171 @@ static const char *cmd_screen(void) {
   return NULL;
 }
 
+static const char *cmd_scan(void) {
+  switch (library_task_rescan()) {
+  case ESP_OK:
+    return NULL;
+  case ESP_ERR_NO_MEM:
+    return "no memory for a library";
+  default:
+    return "no card, or a scan is already running";
+  }
+}
+
+// --- `lib`: what is in the index ---------------------------------------------
+//
+// Each of these holds the index (library_task_get) only while it prints, at
+// most LIB_LIST_MAX lines, and lets go before returning.
+
+static void log_artist(const library_t *lib, uint32_t artist) {
+  uint32_t first, albums, tracks;
+  library_artist_albums(lib, artist, &first, &albums);
+  library_artist_tracks(lib, artist, &first, &tracks);
+  ESP_LOGI(TAG, "artist %" PRIu32 " \"%s\" albums=%" PRIu32 " tracks=%" PRIu32,
+           artist, library_artist_name(lib, artist), albums, tracks);
+}
+
+static void log_album(const library_t *lib, uint32_t album) {
+  uint32_t first, tracks;
+  library_album_tracks(lib, album, &first, &tracks);
+  ESP_LOGI(TAG, "album %" PRIu32 " \"%s\" artist=%" PRIu32 " tracks=%" PRIu32,
+           album, library_album_name(lib, album),
+           library_album_artist(lib, album), tracks);
+}
+
+static void log_track(const library_t *lib, uint32_t track) {
+  library_track_t t;
+  library_track(lib, track, &t);
+  library_track_path(lib, track, s_path, sizeof(s_path));
+  ESP_LOGI(TAG,
+           "track %" PRIu32 " \"%s\" artist=\"%s\" album=%" PRIu32
+           " no=%u.%u ms=%" PRIu32 " path=\"%s\"",
+           track, t.title, t.artist, t.album, (unsigned)t.disc_no,
+           (unsigned)t.track_no, t.duration_ms, s_path);
+}
+
+typedef enum { LIST_ARTISTS, LIST_ALBUMS, LIST_TRACKS, LIST_SONGS } list_t;
+
+// Print items [from, from + count) of a list that starts at `first` and has
+// `total` items, then one line that says what was printed.
+static void log_list(const library_t *lib, list_t what, uint32_t first,
+                     uint32_t total, uint32_t from, uint32_t count) {
+  if (from > total) {
+    from = total;
+  }
+  if (count > total - from) {
+    count = total - from;
+  }
+  // Cut short by the limit, and not by the list or the request ending?
+  bool capped = count > LIB_LIST_MAX;
+  if (capped) {
+    count = LIB_LIST_MAX;
+  }
+  for (uint32_t i = from; i < from + count; i++) {
+    switch (what) {
+    case LIST_ARTISTS:
+      log_artist(lib, first + i);
+      break;
+    case LIST_ALBUMS:
+      log_album(lib, first + i);
+      break;
+    case LIST_TRACKS:
+      log_track(lib, first + i);
+      break;
+    case LIST_SONGS:
+      log_track(lib, library_song_by_title(lib, i));
+      break;
+    }
+  }
+  ESP_LOGI(TAG, "lib listed=%" PRIu32 " from=%" PRIu32 " of=%" PRIu32 "%s",
+           count, from, total, capped ? " capped" : "");
+}
+
+// Up to `max` numbers separated by spaces, and nothing else. Returns how
+// many there were, or -1.
+static int parse_numbers(char *args, uint32_t *out, int max) {
+  int n = 0;
+  char *save = NULL;
+  for (char *word = strtok_r(args, " \t", &save); word != NULL;
+       word = strtok_r(NULL, " \t", &save)) {
+    long long value;
+    if (n == max || !all_digits(word) || !parse_number(word, &value) ||
+        value > UINT32_MAX) {
+      return -1;
+    }
+    out[n++] = (uint32_t)value;
+  }
+  return n;
+}
+
+static const char *cmd_lib_with(const library_t *lib, char *args) {
+  if (*args == '\0') {
+    ESP_LOGI(TAG,
+             "lib tracks=%" PRIu32 " albums=%" PRIu32 " artists=%" PRIu32
+             " bytes=%" PRIu32,
+             library_track_count(lib), library_album_count(lib),
+             library_artist_count(lib), library_bytes(lib));
+    return NULL;
+  }
+  char *rest = args;
+  while (*rest != '\0' && *rest != ' ' && *rest != '\t') {
+    rest++;
+  }
+  if (*rest != '\0') {
+    *rest++ = '\0';
+    rest = skip_spaces(rest);
+  }
+
+  if (strcmp(args, "find") == 0) {
+    uint32_t track;
+    if (*rest == '\0') {
+      return "no path";
+    }
+    if (!library_find_path(lib, rest, &track)) {
+      return "not in the library";
+    }
+    log_track(lib, track);
+    return NULL;
+  }
+
+  uint32_t n[2] = {0, 0};
+  int given = parse_numbers(rest, n, 2);
+  uint32_t first, total;
+  if (strcmp(args, "artists") == 0 && given >= 0 && given <= 1) {
+    log_list(lib, LIST_ARTISTS, 0, library_artist_count(lib), n[0],
+             UINT32_MAX);
+  } else if (strcmp(args, "albums") == 0 && given >= 1) {
+    if (n[0] >= library_artist_count(lib)) {
+      return "no such artist";
+    }
+    library_artist_albums(lib, n[0], &first, &total);
+    log_list(lib, LIST_ALBUMS, first, total, n[1], UINT32_MAX);
+  } else if (strcmp(args, "tracks") == 0 && given >= 1) {
+    if (n[0] >= library_album_count(lib)) {
+      return "no such album";
+    }
+    library_album_tracks(lib, n[0], &first, &total);
+    log_list(lib, LIST_TRACKS, first, total, n[1], UINT32_MAX);
+  } else if (strcmp(args, "songs") == 0 && given == 2) {
+    log_list(lib, LIST_SONGS, 0, library_track_count(lib), n[0], n[1]);
+  } else {
+    return "expected: lib | lib artists [from] | lib albums <artist#> [from] "
+           "| lib tracks <album#> [from] | lib songs <from> <count> | "
+           "lib find <path>";
+  }
+  return NULL;
+}
+
+static const char *cmd_lib(char *args) {
+  const library_t *lib = library_task_get();
+  if (lib == NULL) {
+    return "no library (none loaded yet, or a scan is running)";
+  }
+  const char *why = cmd_lib_with(lib, args);
+  library_task_put();
+  return why;
+}
+
 // The screen shows the player's state but is redrawn only when the UI task
 // has something to handle. A key event with no key makes it look again, so
 // that a change made from here shows up.
@@ -244,6 +414,10 @@ static void run_line(const char *line) {
     why = cmd_stat();
   } else if (strcmp(word, "screen") == 0 && no_args) {
     why = cmd_screen();
+  } else if (strcmp(word, "scan") == 0 && no_args) {
+    why = cmd_scan();
+  } else if (strcmp(word, "lib") == 0) {
+    why = cmd_lib(args);
   } else {
     why = "unknown command";
   }

@@ -8,6 +8,7 @@
 #include "keypad.h"
 #include "keys.h"
 #include "lcd.h"
+#include "library_task.h"
 #include "marquee.h"
 #include "pcm.h"
 #include "pins.h"
@@ -32,6 +33,7 @@
 #define TITLE_MAX_BYTES 256 // a file name on the card is at most 255 characters
 #define CARD_EVENT_QUEUE_LENGTH 2
 #define CARD_RETRY_MS 2000
+#define LIBRARY_STATUS_QUEUE_LENGTH 1 // the latest status, overwritten
 
 static const char *TAG = "dap";
 // The player's events are logged here, by the task that reads them, under
@@ -41,6 +43,7 @@ static const char *PLAYER_TAG = "player";
 static QueueHandle_t s_key_events;
 static QueueHandle_t s_player_events;
 static QueueHandle_t s_card_events;
+static QueueHandle_t s_library_status;
 static QueueSetHandle_t s_ui_events; // all of the above
 
 // What the main task tells the UI task about the card at start-up. The UI
@@ -60,6 +63,8 @@ typedef struct {
   uint32_t duration_ms;
   bool failed; // the last `play` ended in an error
   bool no_card; // start-up is still waiting for a card that mounts
+  bool scanning; // the library is being scanned: show the count
+  uint32_t scan_tracks;
   uint32_t underruns; // how many have been reported so far
   bool backlight;
   char path[PATH_MAX_BYTES]; // scratch, for STARTED
@@ -92,7 +97,7 @@ static uint32_t ui_title_ms(const ui_t *ui) {
 // How long until the screen changes by itself, with no event: UINT32_MAX if
 // it never will. Only a title too long for its row does that.
 static uint32_t ui_next_change_ms(const ui_t *ui, uint32_t title_ms) {
-  if (ui->no_card) {
+  if (ui->no_card || ui->scanning) {
     return UINT32_MAX;
   }
   return marquee_next_change_ms(ui->title, SCREEN_COLS, title_ms);
@@ -107,6 +112,15 @@ static void ui_render(const ui_t *ui, uint32_t title_ms, screen_t *screen) {
     // whatever else happens (a `play` from the console fails, for one).
     screen_set_row(screen, 0, "Insert SD card");
     screen_set_row(screen, 1, "");
+    return;
+  }
+  if (ui->scanning) {
+    // The scan has stopped playback, so there is nothing else to show. The
+    // count arrives at most four times a second.
+    char count[2 * SCREEN_COLS];
+    snprintf(count, sizeof(count), "%" PRIu32 " tracks", ui->scan_tracks);
+    screen_set_row(screen, 0, "Scanning...");
+    screen_set_row(screen, 1, count);
     return;
   }
 
@@ -223,8 +237,8 @@ static TickType_t ticks_until(uint32_t ms) {
   return (TickType_t)((ms + portTICK_PERIOD_MS - 1) / portTICK_PERIOD_MS + 1);
 }
 
-// Owns the LCD. Sleeps until a key event, a player event or a card event
-// arrives (the queue set is what lets it wait for all of them at once), or
+// Owns the LCD. Sleeps until a key event, a player event, a card event or
+// news of the library arrives (the queue set is what lets it wait for all of them at once), or
 // until a moving title is due its next step, whichever comes first. With a
 // title that fits there is no such step and it sleeps until an event.
 static void ui_task(void *arg) {
@@ -270,6 +284,12 @@ static void ui_task(void *arg) {
         // A `play` that failed for want of a card says nothing about now.
         ui.failed = false;
       }
+    } else if (ready == s_library_status) {
+      library_status_t status;
+      if (xQueueReceive(s_library_status, &status, 0) == pdTRUE) {
+        ui.scanning = status.scanning;
+        ui.scan_tracks = status.tracks;
+      }
     }
     // Otherwise the wait ran out: the title is due its next step.
   }
@@ -284,14 +304,18 @@ static void start_display_and_keys(void) {
   s_player_events =
       xQueueCreate(PLAYER_EVENT_QUEUE_LENGTH, sizeof(player_event_t));
   s_card_events = xQueueCreate(CARD_EVENT_QUEUE_LENGTH, sizeof(card_event_t));
+  s_library_status =
+      xQueueCreate(LIBRARY_STATUS_QUEUE_LENGTH, sizeof(library_status_t));
   s_ui_events = xQueueCreateSet(KEY_QUEUE_LENGTH + PLAYER_EVENT_QUEUE_LENGTH +
-                                CARD_EVENT_QUEUE_LENGTH);
+                                CARD_EVENT_QUEUE_LENGTH +
+                                LIBRARY_STATUS_QUEUE_LENGTH);
   configASSERT(s_key_events && s_player_events && s_card_events &&
-               s_ui_events);
+               s_library_status && s_ui_events);
   // Queues must join the set while still empty, so before anything posts.
   xQueueAddToSet(s_key_events, s_ui_events);
   xQueueAddToSet(s_player_events, s_ui_events);
   xQueueAddToSet(s_card_events, s_ui_events);
+  xQueueAddToSet(s_library_status, s_ui_events);
 
   // The LCD is set up here, before the UI task exists; from then on only
   // that task touches it.
@@ -419,7 +443,15 @@ void app_main(void) {
     ESP_LOGW(TAG, "No debug console (%s)", esp_err_to_name(err));
   }
 
+  // The library is optional too: without its memory the player still plays
+  // whatever it is told to (library_task_start has said why in the log).
+  library_task_start(s_library_status);
+
   wait_for_card();
+
+  // Load the library's index, or scan the card if there is none. Nothing
+  // plays until that is done: a scan wants the card to itself.
+  library_task_boot();
 
   // Play the first FLAC we find. The card stays mounted afterwards.
   char track[PATH_MAX_BYTES];

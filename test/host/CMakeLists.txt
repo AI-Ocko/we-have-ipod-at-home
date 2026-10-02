@@ -1,5 +1,5 @@
-# Builds the hardware-free dap_core sources with the host compiler and runs
-# their Unity tests. Not part of the firmware build.
+# Builds the hardware-free dap_core and dap_fs sources with the host compiler
+# and runs their Unity tests. Not part of the firmware build.
 cmake_minimum_required(VERSION 3.22)
 project(dap_host_tests C)
 
@@ -41,6 +41,14 @@ add_library(dap_core STATIC
 )
 target_include_directories(dap_core PUBLIC ${CORE_DIR})
 
+# The code that walks a file system: POSIX directory calls, no hardware.
+set(FS_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../components/dap_fs)
+add_library(dap_fs STATIC
+  ${FS_DIR}/libscan.c
+)
+target_include_directories(dap_fs PUBLIC ${FS_DIR})
+target_link_libraries(dap_fs PUBLIC dap_core)
+
 enable_testing()
 
 function(dap_test name)
@@ -78,3 +86,9 @@ target_compile_definitions(test_library_heapsort PRIVATE
   LIBRARY_SORT_QUICK_BUDGET=0)
 target_link_libraries(test_library_heapsort PRIVATE dap_core unity)
 add_test(NAME test_library_heapsort COMMAND test_library_heapsort)
+# The scan, against the small library made by tools/make_test_audio.sh;
+# fixtures/lib/README.md lists what it holds.
+dap_test(test_libscan)
+target_link_libraries(test_libscan PRIVATE dap_fs)
+target_compile_definitions(test_libscan PRIVATE
+  FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/lib")
