@@ -19,14 +19,21 @@
 //   long <char>              a press, a long press and a release
 //   hold <char> <repeats>    a key held down: see below
 //   stat                     logs `stat state=... pos_ms=... vol=... fill=...
-//                            low=...` and more (see player_status.h)
+//                            low=...` and more (see player_status.h), ending
+//                            with the UI task's numbers (ui.h): `ui_stack_free=
+//                            <bytes> ui_passes=<n> ui_lcd=<n>`
 //   stall <ms>               test aid: the decoder task does nothing for that
 //                            long (at most 30000), to force an underrun
 //   screen                   logs what the LCD was last told to show, each
 //                            row in quotes: `screen "<16 chars>" "<16 chars>"`.
-//                            A user-defined character (a code below 0x20) or
-//                            anything else that is not printable ASCII is
-//                            shown as `?`.
+//                            The UI's user-defined characters (ui.h) are
+//                            printed as stand-ins: `>` play (also the key
+//                            test's triangle), `=` pause, and `#` `+` `-` a
+//                            full, a half and an empty cell of the volume
+//                            bar. Anything else that is not printable ASCII
+//                            is shown as `?`. (A list's cursor is a real
+//                            `>`: it is followed at once by the item, the
+//                            play symbol by a space.)
 //   scan                     start a scan of the card (library_task_rescan).
 //                            `ok` means it has started; its progress and
 //                            result are logged under the tag `library`.

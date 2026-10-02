@@ -9,6 +9,7 @@
 #include "libscan.h"
 #include "player.h"
 #include "player_status.h"
+#include "ui.h"
 #include <ctype.h>
 #include <errno.h>
 #include <inttypes.h>
@@ -231,18 +232,43 @@ static const char *cmd_stat(void) {
   static const char *const STATE[] = {"idle", "playing", "paused"};
   player_status_t s;
   player_get_status(&s);
+  ui_stats_t ui;
+  ui_get_stats(&ui);
   ESP_LOGI(TAG,
            "stat state=%s pos_ms=%u vol=%d fill=%u low=%d underruns=%u "
            "wall_ms=%u dec_busy_ms=%u out_busy_ms=%u dec_stack_free=%u "
-           "out_stack_free=%u heap_int=%u heap_int_largest=%u",
+           "out_stack_free=%u heap_int=%u heap_int_largest=%u "
+           "ui_stack_free=%u ui_passes=%u ui_lcd=%u",
            STATE[s.state], (unsigned)s.position_ms, s.volume,
            (unsigned)s.ring_fill, (int)s.ring_low, (unsigned)s.underruns,
            (unsigned)s.wall_ms, (unsigned)s.decoder_busy_ms,
            (unsigned)s.output_busy_ms, (unsigned)s.decoder_stack_free,
            (unsigned)s.output_stack_free,
            (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
-           (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+           (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
+           (unsigned)ui.stack_free, (unsigned)ui.passes,
+           (unsigned)ui.lcd_updates);
   return NULL;
+}
+
+// What `screen` prints for a cell: the character itself if it is printable
+// ASCII, a stand-in for each of the UI's user-defined characters, `?` for
+// anything else.
+static char screen_char(unsigned char cell) {
+  switch (cell) {
+  case UI_GLYPH_PLAY:
+    return '>';
+  case UI_GLYPH_PAUSE:
+    return '=';
+  case UI_GLYPH_BAR_FULL:
+    return '#';
+  case UI_GLYPH_BAR_HALF:
+    return '+';
+  case UI_GLYPH_BAR_EMPTY:
+    return '-';
+  default:
+    return (cell < 0x20 || cell > 0x7e) ? '?' : (char)cell;
+  }
 }
 
 static const char *cmd_screen(void) {
@@ -259,8 +285,7 @@ static const char *cmd_screen(void) {
   char rows[SCREEN_ROWS][SCREEN_COLS + 1];
   for (int r = 0; r < SCREEN_ROWS; r++) {
     for (int c = 0; c < SCREEN_COLS; c++) {
-      unsigned char cell = (unsigned char)screen.cells[r][c];
-      rows[r][c] = (cell < 0x20 || cell > 0x7e) ? '?' : (char)cell;
+      rows[r][c] = screen_char((unsigned char)screen.cells[r][c]);
     }
     rows[r][SCREEN_COLS] = '\0';
   }

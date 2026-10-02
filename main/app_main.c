@@ -10,34 +10,25 @@
 #include "player.h"
 #include "storage.h"
 #include "ui.h"
-#include <dirent.h>
 #include <inttypes.h>
 #include <stdbool.h>
-#include <stdio.h>
-#include <string.h>
-#include <strings.h>
 
-#define PATH_MAX_BYTES 320
 #define CARD_RETRY_MS 2000
 
 static const char *TAG = "dap";
 
 static ui_queues_t s_queues;
 
-// Bring up the LCD, the UI task and the keypad. The LCD and keypad are not
-// required for audio, so their failures are logged and the player carries
-// on.
-static void start_display_and_keys(void) {
-  esp_err_t err = ui_start(&s_queues);
-  configASSERT(err == ESP_OK);
-
+// Start the keypad. It is not required for audio (the console can drive the
+// player), so a failure is logged and the player carries on.
+static void start_keys(void) {
   const keypad_pins_t keypad_pins = {
       .rows = {PIN_KEYPAD_ROW_1, PIN_KEYPAD_ROW_2, PIN_KEYPAD_ROW_3,
                PIN_KEYPAD_ROW_4},
       .cols = {PIN_KEYPAD_COL_1, PIN_KEYPAD_COL_2, PIN_KEYPAD_COL_3,
                PIN_KEYPAD_COL_4},
   };
-  err = keypad_init(&keypad_pins);
+  esp_err_t err = keypad_init(&keypad_pins);
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "Keypad setup failed (%s)", esp_err_to_name(err));
     return;
@@ -58,32 +49,6 @@ static void start_display_and_keys(void) {
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "Keypad task failed to start (%s)", esp_err_to_name(err));
   }
-}
-
-// Find the first .flac in one directory.
-static bool find_flac_in(const char *dir_path, char *out, size_t out_len) {
-  DIR *dir = opendir(dir_path);
-  if (!dir) {
-    return false;
-  }
-  struct dirent *ent;
-  bool found = false;
-  while ((ent = readdir(dir)) != NULL) {
-    const char *dot = strrchr(ent->d_name, '.');
-    if (dot && strcasecmp(dot, ".flac") == 0) {
-      snprintf(out, out_len, "%s/%s", dir_path, ent->d_name);
-      found = true;
-      break;
-    }
-  }
-  closedir(dir);
-  return found;
-}
-
-// Look in the music folder first, then the top level of the card.
-static bool find_flac(char *out, size_t out_len) {
-  return find_flac_in(STORAGE_MOUNT_POINT "/music", out, out_len) ||
-         find_flac_in(STORAGE_MOUNT_POINT, out, out_len);
 }
 
 // Mount the card, however long that takes. On this board a cold plug-in to a
@@ -123,8 +88,15 @@ static void wait_for_card(void) {
 }
 
 void app_main(void) {
-  // Screen and keys first: they work with or without a card.
-  start_display_and_keys();
+  // Screen and keys first: they work with or without a card. Without the
+  // UI's queues nothing else can be started.
+  esp_err_t err = ui_start(&s_queues);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "The user interface failed to start (%s)",
+             esp_err_to_name(err));
+    return;
+  }
+  start_keys();
 
   const audio_out_pins_t pins = {
       .bck = PIN_I2S_BCK,
@@ -132,7 +104,7 @@ void app_main(void) {
       .dout = PIN_I2S_DOUT,
   };
   audio_out_init(&pins);
-  esp_err_t err = player_start(s_queues.player_events);
+  err = player_start(s_queues.player_events);
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "The player failed to start (%s)", esp_err_to_name(err));
     return;
@@ -150,15 +122,6 @@ void app_main(void) {
   wait_for_card();
 
   // Load the library's index, or scan the card if there is none. Nothing
-  // plays until that is done: a scan wants the card to itself.
+  // plays by itself: the UI shows the main menu and waits for the user.
   library_task_boot();
-
-  // Play the first FLAC we find. The card stays mounted afterwards.
-  char track[PATH_MAX_BYTES];
-  if (!find_flac(track, sizeof(track))) {
-    ESP_LOGW(TAG, "No .flac found in " STORAGE_MOUNT_POINT "/music");
-    return;
-  }
-  ESP_LOGI(TAG, "Playing %s", track);
-  player_play(track, 0, NULL);
 }
