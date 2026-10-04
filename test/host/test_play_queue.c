@@ -1299,12 +1299,17 @@ void test_save_and_restore_round_trip(void) {
 
   // A file that cannot be written, and no file.
   TEST_ASSERT_FALSE(play_queue_save(&q, INDEX_CHECKSUM, NULL));
-  FILE *full = fopen("/dev/full", "wb");
-  if (full != NULL) {
-    open_file = full;
-    play_queue_load(&q, lib, songs(), 0);
-    TEST_ASSERT_FALSE(play_queue_save(&q, INDEX_CHECKSUM, full));
+  // /dev/full takes the place of the last file, which is closed first;
+  // tearDown closes it.
+  if (open_file != NULL) {
+    fclose(open_file);
   }
+  open_file = fopen("/dev/full", "wb");
+  if (open_file == NULL) {
+    TEST_IGNORE_MESSAGE("no /dev/full: a save to a full card is not tested");
+  }
+  play_queue_load(&q, lib, songs(), 0);
+  TEST_ASSERT_FALSE(play_queue_save(&q, INDEX_CHECKSUM, open_file));
 }
 
 void test_restore_rejects_another_index(void) {

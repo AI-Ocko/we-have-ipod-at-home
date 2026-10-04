@@ -5,4 +5,5 @@ idf_component_register(SRCS "translit.c" "screen.c" "keys.c" "keytest.c"
                             "mp3_xing.c" "marquee.c" "tags.c"
                             "library.c" "menu.c" "tracklist.c"
                             "browse.c" "play_queue.c" "options.c"
+                            "crc32.c" "textentry.c"
                        INCLUDE_DIRS ".")

@@ -43,6 +43,8 @@ add_library(dap_core STATIC
   ${CORE_DIR}/browse.c
   ${CORE_DIR}/play_queue.c
   ${CORE_DIR}/options.c
+  ${CORE_DIR}/crc32.c
+  ${CORE_DIR}/textentry.c
 )
 target_include_directories(dap_core PUBLIC ${CORE_DIR})
 
@@ -78,6 +80,8 @@ dap_test(test_tracklist)
 dap_test(test_browse)
 dap_test(test_play_queue)
 dap_test(test_options)
+dap_test(test_crc32)
+dap_test(test_textentry)
 # The FLAC files made by tools/make_test_audio.sh.
 target_compile_definitions(test_flac_header PRIVATE
   FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures")

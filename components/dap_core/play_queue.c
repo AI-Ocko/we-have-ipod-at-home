@@ -1,5 +1,7 @@
 #include "play_queue.h"
 
+#include "crc32.h"
+
 #include <string.h>
 
 // Design notes
@@ -353,43 +355,13 @@ static inline void put32(uint8_t *p, uint32_t v) {
   p[3] = (uint8_t)(v >> 24);
 }
 
-// CRC-32 as in zlib, PNG and Ethernet (and the index): polynomial 0x04C11DB7
-// reflected (0xEDB88320), start value and final XOR 0xFFFFFFFF. The check
-// value for "123456789" is 0xCBF43926.
-//
-// Half a byte at a time from a table of 16: two look-ups per byte where the
-// index's table of 256 takes one. The queue file is at most 32 KB and is
-// checked once per save, in a task that has nothing better to do, so the
-// kilobyte goes unspent.
-#define CRC_START 0xFFFFFFFFu
-
-static const uint32_t CRC_HALF[16] = {
-    0x00000000u, 0x1DB71064u, 0x3B6E20C8u, 0x26D930ACu,
-    0x76DC4190u, 0x6B6B51F4u, 0x4DB26158u, 0x5005713Cu,
-    0xEDB88320u, 0xF00F9344u, 0xD6D6A3E8u, 0xCB61B38Cu,
-    0x9B64C2B0u, 0x86D3D2D4u, 0xA00AE278u, 0xBDBDF21Cu};
-
-// Carry a checksum on over `n` more bytes. Start from CRC_START; the
-// checksum is the complement of the last result.
-static uint32_t crc32_more(uint32_t crc, const void *bytes, size_t n) {
-  const uint8_t *p = bytes;
-  for (size_t i = 0; i < n; i++) {
-    crc ^= p[i];
-    crc = CRC_HALF[crc & 0xFu] ^ (crc >> 4);
-    crc = CRC_HALF[crc & 0xFu] ^ (crc >> 4);
-  }
-  return crc;
-}
-
 // The checksum of a file with this header and these two orders, each of
 // `bytes` bytes.
 static uint32_t file_crc(const uint8_t *header, const uint16_t *play,
                          const uint16_t *original, size_t bytes) {
-  uint32_t crc =
-      crc32_more(CRC_START, header + F_INDEX, HEADER_BYTES - F_INDEX);
-  crc = crc32_more(crc, play, bytes);
-  crc = crc32_more(crc, original, bytes);
-  return ~crc;
+  uint32_t crc = crc32_update(0, header + F_INDEX, HEADER_BYTES - F_INDEX);
+  crc = crc32_update(crc, play, bytes);
+  return crc32_update(crc, original, bytes);
 }
 
 bool play_queue_save(const play_queue_t *q, uint32_t index_checksum, FILE *f) {
