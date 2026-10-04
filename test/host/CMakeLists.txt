@@ -46,6 +46,7 @@ add_library(dap_core STATIC
   ${CORE_DIR}/crc32.c
   ${CORE_DIR}/textentry.c
   ${CORE_DIR}/playlist.c
+  ${CORE_DIR}/playlist_catalog.c
 )
 target_include_directories(dap_core PUBLIC ${CORE_DIR})
 
@@ -89,6 +90,7 @@ dap_test(test_playlist)
 target_compile_definitions(test_playlist PRIVATE
   FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/playlists")
 target_link_options(test_playlist PRIVATE -Wl,--wrap=fread -Wl,--wrap=fwrite)
+dap_test(test_playlist_catalog)
 # The FLAC files made by tools/make_test_audio.sh.
 target_compile_definitions(test_flac_header PRIVATE
   FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures")

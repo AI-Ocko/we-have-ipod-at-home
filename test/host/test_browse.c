@@ -1,5 +1,6 @@
 #include "browse.h"
 #include "lib16.h"
+#include "play_queue.h"
 #include "unity.h"
 #include <stdint.h>
 #include <string.h>
@@ -30,7 +31,7 @@ enum {
   HITS_VARIOUS
 };
 // The rows of the main menu.
-enum { NOW_PLAYING, ARTISTS, ALBUMS, SONGS, SETTINGS };
+enum { NOW_PLAYING, ARTISTS, ALBUMS, SONGS, PLAYLISTS, SETTINGS };
 
 // --- Helpers -----------------------------------------------------------------
 
@@ -162,8 +163,8 @@ static uint32_t jump_from(uint32_t row, int direction) {
   return browse_menu(&b)->cursor;
 }
 
-static const char *const MAIN_ITEMS[] = {"Now Playing", "Artists", "Albums",
-                                         "Songs", "Settings"};
+static const char *const MAIN_ITEMS[] = {
+    "Now Playing", "Artists", "Albums", "Songs", "Playlists", "Settings"};
 static const char *const SETTINGS_ITEMS[] = {"Rescan library", "Keypad test",
                                              "About"};
 static const char *const ARTIST_NAMES[] = {"Bjork",          "Deep Artist",
@@ -201,7 +202,7 @@ static const char *const RADIOHEAD_TITLES[] = {
 void test_starts_at_the_main_menu(void) {
   // Straight after browse_init, before any refresh and without an index.
   assert_at(BROWSE_MAIN, 0, 0);
-  TEST_ASSERT_EQUAL_UINT32(5, browse_menu(&b)->count);
+  TEST_ASSERT_EQUAL_UINT32(6, browse_menu(&b)->count);
   TEST_ASSERT_EQUAL_UINT32(0, browse_menu(&b)->cursor);
   TEST_ASSERT_EQUAL_STRING("Main", name());
   TEST_ASSERT_EQUAL_STRING("Now Playing", item(0));
@@ -209,7 +210,7 @@ void test_starts_at_the_main_menu(void) {
 
 void test_main_menu_items_and_actions(void) {
   browse_refresh(&b, lib);
-  assert_items(MAIN_ITEMS, 5);
+  assert_items(MAIN_ITEMS, 6);
 
   act(NOW_PLAYING, BROWSE_NOW_PLAYING);
 
@@ -400,7 +401,7 @@ void test_back_at_the_main_menu_is_refused(void) {
   TEST_ASSERT_FALSE(browse_back(&b));
   assert_at(BROWSE_MAIN, 0, 0);
   TEST_ASSERT_EQUAL_UINT32(3, browse_menu(&b)->cursor);
-  TEST_ASSERT_EQUAL_UINT32(5, browse_menu(&b)->count);
+  TEST_ASSERT_EQUAL_UINT32(6, browse_menu(&b)->count);
 }
 
 void test_names_for_the_top_row(void) {
@@ -502,7 +503,7 @@ void test_groups_follow_the_items(void) {
 // jump made there anyway finds no next group and cannot land somewhere
 // arbitrary.
 void test_levels_that_are_not_alphabetical_have_one_group(void) {
-  TEST_ASSERT_EQUAL_STRING("#####", groups()); // Main
+  TEST_ASSERT_EQUAL_STRING("######", groups()); // Main
   enter(SETTINGS);
   TEST_ASSERT_EQUAL_STRING("###", groups());
   browse_library_changed(&b);
@@ -551,7 +552,7 @@ void test_an_artists_number_album_shares_the_first_group(void) {
 void test_null_library_leaves_main_and_settings_working(void) {
   lib = NULL;
   browse_refresh(&b, NULL);
-  assert_items(MAIN_ITEMS, 5);
+  assert_items(MAIN_ITEMS, 6);
   TEST_ASSERT_EQUAL_STRING("Main", name());
   act(NOW_PLAYING, BROWSE_NOW_PLAYING);
 
@@ -629,9 +630,9 @@ void test_library_changed_returns_to_main(void) {
   browse_library_changed(&b);
   assert_at(BROWSE_MAIN, 0, 0);
   TEST_ASSERT_EQUAL_UINT32(ARTISTS, browse_menu(&b)->cursor); // kept
-  TEST_ASSERT_EQUAL_UINT32(5, browse_menu(&b)->count);
+  TEST_ASSERT_EQUAL_UINT32(6, browse_menu(&b)->count);
   TEST_ASSERT_FALSE(browse_back(&b));
-  assert_items(MAIN_ITEMS, 5);
+  assert_items(MAIN_ITEMS, 6);
 
   // At the main menu already: nothing changes.
   browse_menu(&b)->cursor = SETTINGS;
@@ -915,7 +916,7 @@ void test_target_of_an_artist_row(void) {
 
 void test_no_target_for_all_songs_main_and_settings(void) {
   browse_refresh(&b, lib);
-  for (uint32_t row = 0; row < 5; row++) {
+  for (uint32_t row = 0; row < 6; row++) {
     assert_no_target(row);
   }
   enter(SETTINGS);
@@ -1179,7 +1180,7 @@ void test_a_damaged_stack_is_harmless(void) {
     TEST_ASSERT_TRUE(b.depth >= 0 && b.depth < BROWSE_DEPTH_MAX);
     browse_library_changed(&b);
     assert_at(BROWSE_MAIN, 0, 0);
-    assert_items(MAIN_ITEMS, 5);
+    assert_items(MAIN_ITEMS, 6);
   }
 
   // A screen that is not one of the eight is an empty list with no name.
@@ -1196,7 +1197,7 @@ void test_a_damaged_stack_is_harmless(void) {
   memset(&b, 0, sizeof(b));
   TEST_ASSERT_EQUAL_INT(BROWSE_NOTHING, browse_select(&b, lib).action);
   browse_refresh(&b, lib);
-  assert_items(MAIN_ITEMS, 5);
+  assert_items(MAIN_ITEMS, 6);
 
   // No stack at all.
   browse_init(NULL);
@@ -1244,6 +1245,332 @@ void test_the_stack_holds_nothing_that_points_into_the_index(void) {
   assert_items(ARTIST_NAMES, 6);
 }
 
+// --- Playlists ---------------------------------------------------------------
+
+// What the playlist screens are given: a catalog and the open playlist's
+// entries, owned here as the UI would own them.
+static playlist_catalog_t cat;
+static browse_playlists_t pl;
+
+// Attach a catalog of these files (sorted) and no open playlist.
+static void attach(const char *const *files, uint32_t n) {
+  playlist_catalog_clear(&cat);
+  for (uint32_t i = 0; i < n; i++) {
+    TEST_ASSERT_TRUE(playlist_catalog_add(&cat, files[i]));
+  }
+  playlist_catalog_sort(&cat);
+  pl.catalog = &cat;
+  pl.tracks = NULL;
+  pl.count = 0;
+  pl.playlist = 0;
+  browse_set_playlists(&b, &pl);
+  browse_refresh(&b, lib);
+}
+
+static const char *const FOUR_FILES[] = {"Road Trip.m3u", "chill.m3u8",
+                                         "Workout.M3U", "1999 hits.m3u"};
+static const char *const FOUR_ROWS[] = {"New playlist", "1999 hits", "chill",
+                                        "Road Trip", "Workout"};
+enum { NEW_ROW, HITS_ROW, CHILL_ROW, ROAD_TRIP_ROW, WORKOUT_ROW };
+
+// Track numbers of lib16 and two entries it does not have.
+#define MISSING PLAYLIST_MISSING
+// Track 2 is in the Radiohead-only index too; track 7 is not.
+static const uint16_t ENTRIES[] = {2, MISSING, 7, 300};
+static const char *const ENTRY_ROWS[] = {"Deep Track", "(missing)", "Airbag",
+                                         "(missing)"};
+
+// Open the playlist on `row` of the Playlists level and give it ENTRIES.
+static void open_loaded(uint32_t row) {
+  browse_result_t r = select_in(lib, row);
+  TEST_ASSERT_EQUAL_INT(BROWSE_OPEN_PLAYLIST, r.action);
+  pl.tracks = ENTRIES;
+  pl.count = 4;
+  pl.playlist = r.index;
+  browse_refresh(&b, lib);
+}
+
+void test_main_menu_has_playlists(void) {
+  assert_items(MAIN_ITEMS, 6);
+  TEST_ASSERT_EQUAL_STRING("Playlists", item(PLAYLISTS));
+  // Before any listing the level opens and is empty: there is nothing to
+  // list and nothing to check a new name against.
+  enter(PLAYLISTS);
+  assert_at(BROWSE_PLAYLISTS, 0, 1);
+  TEST_ASSERT_EQUAL_STRING("Playlists", name());
+  assert_items(NULL, 0);
+  act(0, BROWSE_NOTHING);
+  // The listing arrives.
+  attach(FOUR_FILES, 4);
+  TEST_ASSERT_EQUAL_UINT32(5, browse_menu(&b)->count);
+  TEST_ASSERT_TRUE(browse_back(&b));
+  assert_at(BROWSE_MAIN, 0, 0);
+  TEST_ASSERT_EQUAL_UINT32(PLAYLISTS, browse_menu(&b)->cursor);
+  // Settings has moved down one.
+  enter(SETTINGS);
+  assert_at(BROWSE_SETTINGS, 0, 1);
+}
+
+void test_playlists_level_lists_new_then_names(void) {
+  attach(FOUR_FILES, 4);
+  enter(PLAYLISTS);
+  assert_items(FOUR_ROWS, 5);
+  TEST_ASSERT_EQUAL_STRING("Playlists", name());
+  TEST_ASSERT_TRUE(browse_is_alphabetical(&b));
+  TEST_ASSERT_EQUAL_STRING("##CRW", groups());
+  // The library is not needed for any of it.
+  TEST_ASSERT_EQUAL_STRING("Road Trip", item_in(NULL, ROAD_TRIP_ROW));
+  TEST_ASSERT_EQUAL_STRING("New playlist", item_in(NULL, NEW_ROW));
+  // Cut to the buffer like every other item.
+  char out[6];
+  memset(out, '!', sizeof(out));
+  browse_item(&b, lib, ROAD_TRIP_ROW, out, 5);
+  TEST_ASSERT_EQUAL_STRING("Road", out);
+  TEST_ASSERT_EQUAL_CHAR('!', out[5]);
+  // An empty folder: "New playlist" alone.
+  attach(NULL, 0);
+  assert_items(FOUR_ROWS, 1);
+  act(NEW_ROW, BROWSE_NEW_PLAYLIST);
+}
+
+void test_playlists_letter_jump_skips_new(void) {
+  // Row 0 is given the group '#', which is before every letter, as an
+  // artist's "All songs" is: "New playlist" is not under N.
+  static const char *const FILES[] = {"Nights.m3u", "beta.m3u", "Moon.m3u",
+                                      "Alpha.m3u"};
+  attach(FILES, 4);
+  enter(PLAYLISTS);
+  TEST_ASSERT_EQUAL_STRING("#ABMN", groups());
+  TEST_ASSERT_EQUAL_UINT32(1, jump_from(NEW_ROW, 1));
+  TEST_ASSERT_EQUAL_UINT32(4, jump_from(3, 1)); // M to N: Nights, not New
+  TEST_ASSERT_EQUAL_UINT32(4, jump_from(4, 1));
+  TEST_ASSERT_EQUAL_UINT32(3, jump_from(4, -1));
+  TEST_ASSERT_EQUAL_UINT32(1, jump_from(2, -1));
+  // Back from the first letter is the top of the list.
+  TEST_ASSERT_EQUAL_UINT32(0, jump_from(1, -1));
+
+  // A name starting with a digit shares '#' with row 0; the groups still
+  // never go back, and a jump forward from the top passes both.
+  static const char *const DIGITS[] = {"Alpha.m3u", "1999.m3u", "80s.m3u8"};
+  attach(DIGITS, 3);
+  TEST_ASSERT_EQUAL_STRING("###A", groups());
+  TEST_ASSERT_EQUAL_UINT32(3, jump_from(NEW_ROW, 1));
+  TEST_ASSERT_EQUAL_UINT32(3, jump_from(1, 1));
+  TEST_ASSERT_EQUAL_UINT32(0, jump_from(3, -1));
+  TEST_ASSERT_EQUAL_UINT32(0, jump_from(2, -1));
+}
+
+void test_open_playlist_gives_its_number(void) {
+  attach(FOUR_FILES, 4);
+  enter(PLAYLISTS);
+  act(NEW_ROW, BROWSE_NEW_PLAYLIST);
+
+  browse_result_t r = select_in(lib, ROAD_TRIP_ROW);
+  TEST_ASSERT_EQUAL_INT(BROWSE_OPEN_PLAYLIST, r.action);
+  TEST_ASSERT_EQUAL_UINT32(2, r.index); // "Road Trip" in the catalog
+  TEST_ASSERT_EQUAL_STRING("Road Trip.m3u", playlist_catalog_file(&cat, 2));
+  TEST_ASSERT_EQUAL_INT(TRACKLIST_NONE, r.list.kind);
+  assert_at(BROWSE_PLAYLIST, 2, 2);
+  TEST_ASSERT_EQUAL_UINT32(0, browse_menu(&b)->cursor);
+  TEST_ASSERT_EQUAL_STRING("Road Trip", name());
+  TEST_ASSERT_EQUAL_STRING("Road Trip", name_in(NULL));
+  TEST_ASSERT_FALSE(browse_is_alphabetical(&b));
+
+  // Back returns to the row it was opened from; each row opens its own.
+  TEST_ASSERT_TRUE(browse_back(&b));
+  assert_at(BROWSE_PLAYLISTS, 0, 1);
+  TEST_ASSERT_EQUAL_UINT32(ROAD_TRIP_ROW, browse_menu(&b)->cursor);
+  for (uint32_t row = HITS_ROW; row <= WORKOUT_ROW; row++) {
+    r = select_in(lib, row);
+    TEST_ASSERT_EQUAL_INT(BROWSE_OPEN_PLAYLIST, r.action);
+    TEST_ASSERT_EQUAL_UINT32(row - 1, r.index);
+    assert_at(BROWSE_PLAYLIST, row - 1, 2);
+    TEST_ASSERT_EQUAL_STRING(FOUR_ROWS[row], name());
+    TEST_ASSERT_TRUE(browse_back(&b));
+  }
+
+  // A new index takes the stack back to the main menu, as from anywhere.
+  open_loaded(CHILL_ROW);
+  browse_library_changed(&b);
+  assert_at(BROWSE_MAIN, 0, 0);
+}
+
+void test_playlist_level_is_empty_until_loaded(void) {
+  attach(FOUR_FILES, 4);
+  enter(PLAYLISTS);
+  TEST_ASSERT_EQUAL_INT(BROWSE_OPEN_PLAYLIST,
+                        select_in(lib, ROAD_TRIP_ROW).action);
+  // Not loaded yet.
+  assert_items(NULL, 0);
+  act(0, BROWSE_NOTHING);
+  assert_no_target(0);
+  // Another playlist's entries are not this one's.
+  pl.tracks = ENTRIES;
+  pl.count = 4;
+  pl.playlist = 1;
+  browse_refresh(&b, lib);
+  assert_items(NULL, 0);
+  act(0, BROWSE_NOTHING);
+  // Its own.
+  pl.playlist = 2;
+  browse_refresh(&b, lib);
+  assert_items(ENTRY_ROWS, 4);
+  // Loading again (an edit on its way): empty until the entries are back.
+  pl.tracks = NULL;
+  browse_refresh(&b, lib);
+  assert_items(NULL, 0);
+  // An empty playlist.
+  pl.tracks = ENTRIES;
+  pl.count = 0;
+  browse_refresh(&b, lib);
+  assert_items(NULL, 0);
+}
+
+void test_playlist_entries_show_titles_and_missing(void) {
+  attach(FOUR_FILES, 4);
+  enter(PLAYLISTS);
+  open_loaded(WORKOUT_ROW);
+  assert_at(BROWSE_PLAYLIST, 3, 2);
+  assert_items(ENTRY_ROWS, 4);
+  TEST_ASSERT_EQUAL_STRING("Workout", name());
+  // In file order, so one group: a letter jump does nothing harmful.
+  TEST_ASSERT_FALSE(browse_is_alphabetical(&b));
+  TEST_ASSERT_EQUAL_STRING("####", groups());
+  // Without an index nothing is on the card as far as anyone can tell.
+  for (uint32_t row = 0; row < 4; row++) {
+    TEST_ASSERT_EQUAL_STRING("(missing)", item_in(NULL, row));
+  }
+  // A smaller index: track 7 is no longer one of its tracks.
+  const library_t *small = lib16_build(other_words, LIB16_RADIOHEAD_ONLY);
+  TEST_ASSERT_EQUAL_STRING("(missing)", item_in(small, 2));
+}
+
+void test_select_entry_plays_and_missing_says_so(void) {
+  attach(FOUR_FILES, 4);
+  enter(PLAYLISTS);
+  open_loaded(CHILL_ROW);
+  browse_result_t r = act(0, BROWSE_PLAY_ENTRIES);
+  TEST_ASSERT_EQUAL_UINT32(0, r.index);
+  r = act(2, BROWSE_PLAY_ENTRIES);
+  TEST_ASSERT_EQUAL_UINT32(2, r.index);
+  act(1, BROWSE_MISSING);
+  act(3, BROWSE_MISSING);
+
+  // What browse plays is what the queue takes from the same entries.
+  static uint16_t play[8], original[8];
+  play_queue_t queue;
+  play_queue_init(&queue, play, original, 8, 1);
+  for (uint32_t row = 0; row < 4; row++) {
+    browse_menu(&b)->cursor = row;
+    bool plays = browse_select(&b, lib).action == BROWSE_PLAY_ENTRIES;
+    uint32_t taken = play_queue_load_tracks(&queue, pl.tracks, pl.count, row,
+                                            library_track_count(lib));
+    TEST_ASSERT_EQUAL(plays, taken != 0);
+  }
+
+  // Under a smaller index the entry that was there is missing now.
+  const library_t *small = lib16_build(other_words, LIB16_RADIOHEAD_ONLY);
+  act_in(small, 2, BROWSE_MISSING);
+  act_in(small, 0, BROWSE_PLAY_ENTRIES);
+  act_in(NULL, 0, BROWSE_MISSING);
+  // A cursor past the rows the user was shown does nothing.
+  browse_menu(&b)->count = 2;
+  browse_menu(&b)->cursor = 2;
+  TEST_ASSERT_EQUAL_INT(BROWSE_NOTHING, browse_select(&b, lib).action);
+}
+
+void test_target_of_playlist_and_entry_rows(void) {
+  attach(FOUR_FILES, 4);
+  enter(PLAYLISTS);
+  for (uint32_t row = HITS_ROW; row <= WORKOUT_ROW; row++) {
+    browse_target_t t = target_in(lib, row);
+    TEST_ASSERT_EQUAL_INT(BROWSE_TARGET_PLAYLIST, t.kind);
+    TEST_ASSERT_EQUAL_UINT32(row - 1, t.index);
+    TEST_ASSERT_EQUAL_INT(TRACKLIST_NONE, t.list.kind);
+    // The library is not needed for it.
+    TEST_ASSERT_EQUAL_INT(BROWSE_TARGET_PLAYLIST, target_in(NULL, row).kind);
+  }
+  // It is the playlist that selecting the row opens.
+  browse_target_t t = target_in(lib, ROAD_TRIP_ROW);
+  open_loaded(ROAD_TRIP_ROW);
+  TEST_ASSERT_EQUAL_UINT32(level()->id, t.index);
+
+  // Every entry row, missing ones too: they can be moved and removed.
+  for (uint32_t row = 0; row < 4; row++) {
+    t = target_in(lib, row);
+    TEST_ASSERT_EQUAL_INT(BROWSE_TARGET_ENTRY, t.kind);
+    TEST_ASSERT_EQUAL_UINT32(row, t.index);
+    TEST_ASSERT_EQUAL_INT(TRACKLIST_NONE, t.list.kind);
+    TEST_ASSERT_EQUAL_INT(BROWSE_TARGET_ENTRY, target_in(NULL, row).kind);
+  }
+  // Past the rows shown, or with entries that are another playlist's.
+  browse_menu(&b)->count = 2;
+  assert_no_target(2);
+  browse_refresh(&b, lib);
+  pl.playlist = 0;
+  assert_no_target(0);
+}
+
+void test_no_target_for_new_playlist(void) {
+  attach(FOUR_FILES, 4);
+  enter(PLAYLISTS);
+  TEST_ASSERT_EQUAL_STRING("New playlist", item(NEW_ROW));
+  assert_no_target(NEW_ROW);
+  assert_no_target_in(NULL, NEW_ROW);
+  // Nor anything with no listing, or past the end.
+  assert_no_target(5);
+  pl.catalog = NULL;
+  assert_no_target(HITS_ROW);
+  assert_no_target(NEW_ROW);
+  browse_set_playlists(&b, NULL);
+  assert_no_target(HITS_ROW);
+  act(HITS_ROW, BROWSE_NOTHING);
+  browse_refresh(&b, lib);
+  assert_items(NULL, 0);
+}
+
+void test_catalog_shrinking_empties_the_open_playlist(void) {
+  attach(FOUR_FILES, 4);
+  enter(PLAYLISTS);
+  open_loaded(WORKOUT_ROW); // number 3
+  browse_menu(&b)->cursor = 2;
+  assert_items(ENTRY_ROWS, 4);
+
+  // Two playlists are deleted on a computer; the folder is listed again.
+  // Before the refresh nothing reaches past the new catalog.
+  static const char *const TWO[] = {"chill.m3u8", "1999 hits.m3u"};
+  playlist_catalog_clear(&cat);
+  for (uint32_t i = 0; i < 2; i++) {
+    TEST_ASSERT_TRUE(playlist_catalog_add(&cat, TWO[i]));
+  }
+  playlist_catalog_sort(&cat);
+  TEST_ASSERT_EQUAL_STRING("", name());
+  TEST_ASSERT_EQUAL_STRING("", item(0));
+  act(2, BROWSE_NOTHING);
+  assert_no_target(2);
+
+  browse_refresh(&b, lib);
+  assert_at(BROWSE_PLAYLIST, 3, 2);
+  assert_items(NULL, 0);
+  // The level below was brought up to date too, its cursor with it.
+  TEST_ASSERT_EQUAL_UINT32(3, b.levels[1].menu.count);
+  TEST_ASSERT_EQUAL_UINT32(2, b.levels[1].menu.cursor);
+  TEST_ASSERT_TRUE(browse_back(&b));
+  static const char *const ROWS[] = {"New playlist", "1999 hits", "chill"};
+  assert_items(ROWS, 3);
+
+  // An open playlist whose number is still in the catalog keeps its entries
+  // (the caller reloads it if it is another playlist now).
+  open_loaded(2);
+  assert_items(ENTRY_ROWS, 4);
+  // No listing at all: both levels are empty.
+  pl.catalog = NULL;
+  browse_refresh(&b, lib);
+  assert_items(NULL, 0);
+  TEST_ASSERT_EQUAL_UINT32(0, b.levels[1].menu.count);
+  TEST_ASSERT_EQUAL_STRING("", name());
+}
+
 int main(void) {
   UNITY_BEGIN();
   RUN_TEST(test_starts_at_the_main_menu);
@@ -1277,5 +1604,15 @@ int main(void) {
   RUN_TEST(test_a_full_stack_refuses_to_go_deeper);
   RUN_TEST(test_a_damaged_stack_is_harmless);
   RUN_TEST(test_the_stack_holds_nothing_that_points_into_the_index);
+  RUN_TEST(test_main_menu_has_playlists);
+  RUN_TEST(test_playlists_level_lists_new_then_names);
+  RUN_TEST(test_playlists_letter_jump_skips_new);
+  RUN_TEST(test_open_playlist_gives_its_number);
+  RUN_TEST(test_playlist_level_is_empty_until_loaded);
+  RUN_TEST(test_playlist_entries_show_titles_and_missing);
+  RUN_TEST(test_select_entry_plays_and_missing_says_so);
+  RUN_TEST(test_target_of_playlist_and_entry_rows);
+  RUN_TEST(test_no_target_for_new_playlist);
+  RUN_TEST(test_catalog_shrinking_empties_the_open_playlist);
   return UNITY_END();
 }

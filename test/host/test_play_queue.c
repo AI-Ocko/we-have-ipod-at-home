@@ -1,5 +1,6 @@
 #include "lib16.h"
 #include "play_queue.h"
+#include "playlist.h"
 #include "unity.h"
 #include <stdint.h>
 #include <stdio.h>
@@ -264,6 +265,161 @@ void test_load_takes_what_fits_and_keeps_the_chosen_track(void) {
   TEST_ASSERT_EQUAL_UINT32(0, play_queue_load(&none, lib, songs(), 2));
   TEST_ASSERT_EQUAL_UINT32(PLAY_QUEUE_NONE, play_queue_current(&none));
 }
+
+// --- Loading from an array ---------------------------------------------------
+
+#define M PLAYLIST_MISSING
+
+// The queue is exactly `n` tracks in both orders with `current` current.
+static void assert_queue(const play_queue_t *queue, const uint16_t *want,
+                         uint32_t n, uint32_t position) {
+  assert_order(want, n, queue->play, queue->count, "play order");
+  assert_order(want, n, queue->original, queue->count, "original order");
+  TEST_ASSERT_EQUAL_UINT32(position, queue->position);
+  assert_consistent(queue);
+}
+
+void test_load_tracks_skips_missing_and_starts_at_the_chosen_one(void) {
+  // 99 and 16 are not tracks of a 16-track index; M is a missing entry.
+  static const uint16_t ENTRIES[] = {4, M, 7, 99, 5, M, 12, 16};
+  static const uint16_t TAKEN[] = {4, 7, 5, 12};
+  TEST_ASSERT_EQUAL_UINT32(
+      4, play_queue_load_tracks(&q, ENTRIES, 8, 2, LIB16_TRACKS));
+  assert_queue(&q, TAKEN, 4, 1);
+  TEST_ASSERT_EQUAL_UINT32(7, play_queue_current(&q));
+  TEST_ASSERT_EQUAL_UINT32(
+      4, play_queue_load_tracks(&q, ENTRIES, 8, 0, LIB16_TRACKS));
+  assert_queue(&q, TAKEN, 4, 0);
+  TEST_ASSERT_EQUAL_UINT32(
+      4, play_queue_load_tracks(&q, ENTRIES, 8, 4, LIB16_TRACKS));
+  assert_queue(&q, TAKEN, 4, 2);
+  TEST_ASSERT_EQUAL_UINT32(
+      4, play_queue_load_tracks(&q, ENTRIES, 8, 6, LIB16_TRACKS));
+  assert_queue(&q, TAKEN, 4, 3);
+  // A smaller index leaves out more.
+  static const uint16_t BELOW_6[] = {4, 5};
+  TEST_ASSERT_EQUAL_UINT32(2, play_queue_load_tracks(&q, ENTRIES, 8, 4, 6));
+  assert_queue(&q, BELOW_6, 2, 1);
+  // The same track twice is two entries.
+  static const uint16_t TWICE[] = {3, 3, M, 3};
+  TEST_ASSERT_EQUAL_UINT32(
+      3, play_queue_load_tracks(&q, TWICE, 4, 3, LIB16_TRACKS));
+  TEST_ASSERT_EQUAL_UINT32(2, q.position);
+
+  // A list with nothing left out is loaded as play_queue_load loads the
+  // same list, window included, from every start.
+  uint16_t play[4], original[4], play2[4], original2[4];
+  play_queue_t small, by_list;
+  play_queue_init(&small, play, original, 4, 1);
+  play_queue_init(&by_list, play2, original2, 4, 1);
+  for (uint32_t start = 0; start < LIB16_TRACKS; start++) {
+    TEST_ASSERT_EQUAL_UINT32(4,
+                             play_queue_load_tracks(&small, SONGS, LIB16_TRACKS,
+                                                    start, LIB16_TRACKS));
+    TEST_ASSERT_EQUAL_UINT32(4, play_queue_load(&by_list, lib, songs(), start));
+    assert_queue(&small, by_list.play, by_list.count, by_list.position);
+  }
+
+  // Longer than the capacity with entries left out: the chosen one and those
+  // after it; if they do not fill the queue, those before it.
+  static const uint16_t LONG[] = {M, 1, 2, M, 3, 4, 5, M};
+  uint16_t p3[3], o3[3];
+  play_queue_t three;
+  play_queue_init(&three, p3, o3, 3, 1);
+  static const uint16_t FROM_1[] = {1, 2, 3};
+  static const uint16_t FROM_3[] = {3, 4, 5};
+  TEST_ASSERT_EQUAL_UINT32(3, play_queue_load_tracks(&three, LONG, 8, 1, 16));
+  assert_queue(&three, FROM_1, 3, 0);
+  TEST_ASSERT_EQUAL_UINT32(3, play_queue_load_tracks(&three, LONG, 8, 2, 16));
+  static const uint16_t FROM_2[] = {2, 3, 4};
+  assert_queue(&three, FROM_2, 3, 0);
+  TEST_ASSERT_EQUAL_UINT32(3, play_queue_load_tracks(&three, LONG, 8, 4, 16));
+  assert_queue(&three, FROM_3, 3, 0);
+  TEST_ASSERT_EQUAL_UINT32(3, play_queue_load_tracks(&three, LONG, 8, 5, 16));
+  assert_queue(&three, FROM_3, 3, 1);
+  TEST_ASSERT_EQUAL_UINT32(3, play_queue_load_tracks(&three, LONG, 8, 6, 16));
+  assert_queue(&three, FROM_3, 3, 2);
+  // Exactly the capacity once the missing are left out.
+  static const uint16_t FIT[] = {M, 7, M, 8, 9, M};
+  static const uint16_t FIT_TAKEN[] = {7, 8, 9};
+  TEST_ASSERT_EQUAL_UINT32(3, play_queue_load_tracks(&three, FIT, 6, 4, 16));
+  assert_queue(&three, FIT_TAKEN, 3, 2);
+  // One place only: the chosen track alone.
+  uint16_t p1[1], o1[1];
+  play_queue_t one;
+  play_queue_init(&one, p1, o1, 1, 1);
+  static const uint16_t JUST_4[] = {4};
+  TEST_ASSERT_EQUAL_UINT32(1, play_queue_load_tracks(&one, LONG, 8, 5, 16));
+  assert_queue(&one, JUST_4, 1, 0);
+}
+
+void test_load_tracks_refuses_a_missing_start(void) {
+  static const uint16_t ENTRIES[] = {4, M, 7, 99, 5};
+  TEST_ASSERT_EQUAL_UINT32(3, play_queue_load(&q, lib, album(KID_A), 1));
+  play_queue_t before;
+  memcpy(&before, &q, sizeof(q));
+  uint16_t play[CAPACITY], original[CAPACITY];
+  memcpy(play, play_slots, sizeof(play));
+  memcpy(original, original_slots, sizeof(original));
+
+  static const uint32_t STARTS[] = {1, 3, 5, 6, UINT32_MAX};
+  for (size_t i = 0; i < sizeof(STARTS) / sizeof(STARTS[0]); i++) {
+    TEST_ASSERT_EQUAL_UINT32(
+        0, play_queue_load_tracks(&q, ENTRIES, 5, STARTS[i], LIB16_TRACKS));
+  }
+  // An entry the index has but that is not below `index_tracks`.
+  TEST_ASSERT_EQUAL_UINT32(0, play_queue_load_tracks(&q, ENTRIES, 5, 4, 5));
+  // No entries at all.
+  TEST_ASSERT_EQUAL_UINT32(
+      0, play_queue_load_tracks(&q, ENTRIES, 0, 0, LIB16_TRACKS));
+  TEST_ASSERT_EQUAL_UINT32(
+      0, play_queue_load_tracks(&q, NULL, 5, 0, LIB16_TRACKS));
+  // A queue that can hold nothing.
+  play_queue_t none;
+  play_queue_init(&none, play, original, 0, 1);
+  TEST_ASSERT_EQUAL_UINT32(
+      0, play_queue_load_tracks(&none, ENTRIES, 5, 0, LIB16_TRACKS));
+  TEST_ASSERT_EQUAL_UINT32(0, none.count);
+
+  // Unchanged, every byte.
+  TEST_ASSERT_EQUAL_MEMORY(&before, &q, sizeof(q));
+  TEST_ASSERT_EQUAL_UINT16_ARRAY(play, play_slots, CAPACITY);
+  TEST_ASSERT_EQUAL_UINT16_ARRAY(original, original_slots, CAPACITY);
+}
+
+void test_load_tracks_while_shuffle_is_on(void) {
+  // The songs with missing entries among them.
+  uint16_t entries[LIB16_TRACKS + 4];
+  uint32_t n = 0;
+  for (uint32_t i = 0; i < LIB16_TRACKS; i++) {
+    if (i % 5 == 0) {
+      entries[n++] = M;
+    }
+    entries[n++] = SONGS[i];
+  }
+  TEST_ASSERT_EQUAL_UINT32(LIB16_TRACKS + 4, n);
+  uint32_t start = 9; // SONGS[7], after two missing entries
+  TEST_ASSERT_EQUAL_UINT16(SONGS[7], entries[start]);
+
+  play_queue_set_shuffle(&q, true);
+  TEST_ASSERT_EQUAL_UINT32(
+      LIB16_TRACKS,
+      play_queue_load_tracks(&q, entries, n, start, LIB16_TRACKS));
+  TEST_ASSERT_TRUE(q.shuffle);
+  TEST_ASSERT_EQUAL_UINT32(0, q.position);
+  TEST_ASSERT_EQUAL_UINT32(SONGS[7], play_queue_current(&q));
+  assert_original_is_songs(&q);
+  assert_consistent(&q);
+  // The rest is shuffled: not the list's order.
+  TEST_ASSERT_TRUE(memcmp(q.play + 1, SONGS + 8, 8 * sizeof(uint16_t)) != 0);
+
+  // Shuffle off: the list without its missing entries, at the chosen track.
+  play_queue_set_shuffle(&q, false);
+  assert_order(SONGS, LIB16_TRACKS, q.play, q.count, "play order");
+  TEST_ASSERT_EQUAL_UINT32(7, q.position);
+}
+
+#undef M
 
 // --- Next and previous -----------------------------------------------------
 
@@ -1657,6 +1813,9 @@ int main(void) {
   RUN_TEST(test_empty_queue_answers_none);
   RUN_TEST(test_load_from_an_album_starts_at_the_chosen_track);
   RUN_TEST(test_load_takes_what_fits_and_keeps_the_chosen_track);
+  RUN_TEST(test_load_tracks_skips_missing_and_starts_at_the_chosen_one);
+  RUN_TEST(test_load_tracks_refuses_a_missing_start);
+  RUN_TEST(test_load_tracks_while_shuffle_is_on);
   RUN_TEST(test_next_walks_the_queue);
   RUN_TEST(test_next_at_the_end_with_loop_off_stops_and_stays);
   RUN_TEST(test_next_at_the_end_with_loop_all_wraps);

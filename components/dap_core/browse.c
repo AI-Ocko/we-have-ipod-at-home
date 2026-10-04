@@ -40,16 +40,40 @@
 // where that key should go.
 //
 // Levels that are not A to Z (the fixed menus, an album's tracks, an
-// artist's songs) give every item '#': one group, so a jump made there
-// anyway finds no next group and goes at most to the top.
+// artist's songs, a playlist's entries) give every item '#': one group, so a
+// jump made there anyway finds no next group and goes at most to the top.
+//
+// THE PLAYLIST SCREENS
+//
+// What they list is not in the index: the caller lists the folder, loads a
+// playlist's entries, and attaches both (browse_playlists_t). The stack
+// keeps one pointer to that, never a copy, and reads it only inside a call,
+// like the index. The Playlists level's rows are "New playlist", then the
+// catalog's playlists, row r being playlist r - 1; a playlist's level has
+// the playlist's number as its id. Row 0 of Playlists is treated as an
+// artist's "All songs" is (see above): group '#', so letter jumps pass over
+// it and "New playlist" is not under N; a playlist whose name starts with a
+// digit shares its group.
+//
+// A playlist's level lists its entries only while the attached entries are
+// that playlist's (`playlist` is the level's id) and the id is still in the
+// catalog; otherwise it is an empty list, as a library level whose number
+// the index no longer has. An entry is missing if its track is not one of
+// the index's (PLAYLIST_MISSING never is), so with no index every entry is.
+//
+// browse_select does what browse_target says is under the cursor, where
+// there is something: the two cannot disagree about what a row is. Only rows
+// with no target (the fixed menus, "All songs", "New playlist") are decided
+// in browse_select alone.
 
-static const char *const MAIN_ITEMS[] = {"Now Playing", "Artists", "Albums",
-                                         "Songs", "Settings"};
+static const char *const MAIN_ITEMS[] = {
+    "Now Playing", "Artists", "Albums", "Songs", "Playlists", "Settings"};
 enum {
   MAIN_NOW_PLAYING,
   MAIN_ARTISTS,
   MAIN_ALBUMS,
   MAIN_SONGS,
+  MAIN_PLAYLISTS,
   MAIN_SETTINGS,
   MAIN_COUNT
 };
@@ -59,6 +83,8 @@ static const char *const SETTINGS_ITEMS[] = {"Rescan library", "Keypad test",
 enum { SETTINGS_RESCAN, SETTINGS_KEYTEST, SETTINGS_ABOUT, SETTINGS_COUNT };
 
 static const char ALL_SONGS[] = "All songs";
+static const char NEW_PLAYLIST[] = "New playlist";
+static const char MISSING[] = "(missing)";
 
 // The current level's place in the stack, whatever `depth` holds.
 static int depth_of(const browse_t *b) {
@@ -99,8 +125,35 @@ static tracklist_t tracks_of(const browse_level_t *level) {
   return list;
 }
 
+// The catalog attached, or NULL.
+static const playlist_catalog_t *catalog_of(const browse_playlists_t *pl) {
+  return pl != NULL ? pl->catalog : NULL;
+}
+
+// Whether the attached entries are those of the playlist this level lists
+// (see THE PLAYLIST SCREENS).
+static bool entries_loaded(const browse_level_t *level,
+                           const browse_playlists_t *pl) {
+  const playlist_catalog_t *catalog = catalog_of(pl);
+  return catalog != NULL && level->id < catalog->count && pl->tracks != NULL &&
+         pl->playlist == level->id;
+}
+
+// Whether a playlist's level has an entry `index` now.
+static bool has_entry(const browse_level_t *level, const browse_playlists_t *pl,
+                      uint32_t index) {
+  return entries_loaded(level, pl) && index < pl->count;
+}
+
+// Whether entry `index` (which exists) is a track of this index.
+static bool entry_plays(const browse_playlists_t *pl, const library_t *lib,
+                        uint32_t index) {
+  return pl->tracks[index] < library_track_count(lib);
+}
+
 // How many items the level has in this index: one query each.
-static uint32_t count_of(const browse_level_t *level, const library_t *lib) {
+static uint32_t count_of(const browse_level_t *level, const library_t *lib,
+                         const browse_playlists_t *pl) {
   switch (level->screen) {
   case BROWSE_MAIN:
     return MAIN_COUNT;
@@ -121,6 +174,14 @@ static uint32_t count_of(const browse_level_t *level, const library_t *lib) {
   case BROWSE_ALBUM:
   case BROWSE_SONGS:
     return tracklist_count(lib, tracks_of(level));
+  case BROWSE_PLAYLISTS: {
+    // No listing yet: nothing, not even "New playlist", whose name could
+    // not be checked against the playlists there are.
+    const playlist_catalog_t *catalog = catalog_of(pl);
+    return catalog != NULL ? catalog->count + 1 : 0;
+  }
+  case BROWSE_PLAYLIST:
+    return entries_loaded(level, pl) ? pl->count : 0;
   }
   return 0;
 }
@@ -137,8 +198,13 @@ static uint32_t count_of(const browse_level_t *level, const library_t *lib) {
 //   an album        library_album_tracks, library_track_title
 //   artist's songs  library_artist_tracks, library_track_title
 //   Songs           library_song_by_title, library_track_title
+//   Playlists       nothing: for a playlist row the text is its FILE name
+//                   (browse_item shows the name, without the ending; the
+//                   first character, which is all browse_group reads, is
+//                   the same)
+//   a playlist      library_track_count, library_track_title
 static const char *item_text(const browse_level_t *level, const library_t *lib,
-                             uint32_t index) {
+                             const browse_playlists_t *pl, uint32_t index) {
   switch (level->screen) {
   case BROWSE_MAIN:
     return index < MAIN_COUNT ? MAIN_ITEMS[index] : "";
@@ -165,6 +231,19 @@ static const char *item_text(const browse_level_t *level, const library_t *lib,
     // track at that position gives "".
     return library_track_title(lib,
                                tracklist_track(lib, tracks_of(level), index));
+  case BROWSE_PLAYLISTS:
+    if (catalog_of(pl) == NULL) {
+      return "";
+    }
+    return index == 0 ? NEW_PLAYLIST
+                      : playlist_catalog_file(catalog_of(pl), index - 1);
+  case BROWSE_PLAYLIST:
+    if (!has_entry(level, pl, index)) {
+      return "";
+    }
+    return entry_plays(pl, lib, index)
+               ? library_track_title(lib, pl->tracks[index])
+               : MISSING;
   }
   return "";
 }
@@ -196,12 +275,32 @@ void browse_init(browse_t *b) {
   menu_reset(&b->levels[0].menu, MAIN_COUNT);
 }
 
+void browse_set_playlists(browse_t *b, const browse_playlists_t *p) {
+  if (b != NULL) {
+    b->playlists = p;
+  }
+}
+
+static bool is_playlist_level(const browse_level_t *level) {
+  return level->screen == BROWSE_PLAYLISTS || level->screen == BROWSE_PLAYLIST;
+}
+
 void browse_refresh(browse_t *b, const library_t *lib) {
   if (b == NULL) {
     return;
   }
   browse_level_t *level = current(b);
-  menu_set_count(&level->menu, count_of(level, lib));
+  // The playlist levels under the current one too: the catalog can change
+  // while a playlist is open (a rename, a delete), and going back must find
+  // the Playlists level's count and cursor right. Library levels under the
+  // current one cannot change without browse_library_changed.
+  for (int d = 0; d < b->depth; d++) {
+    browse_level_t *under = &b->levels[d];
+    if (is_playlist_level(under)) {
+      menu_set_count(&under->menu, count_of(under, lib, b->playlists));
+    }
+  }
+  menu_set_count(&level->menu, count_of(level, lib, b->playlists));
 }
 
 void browse_library_changed(browse_t *b) {
@@ -249,6 +348,13 @@ void browse_name(const browse_t *b, const library_t *lib, char *out,
     case BROWSE_ALBUM:
       name = library_album_name(lib, level->id);
       break;
+    case BROWSE_PLAYLISTS:
+      name = "Playlists";
+      break;
+    case BROWSE_PLAYLIST:
+      // "" for a number the catalog does not have.
+      playlist_catalog_name(catalog_of(b->playlists), level->id, out, out_size);
+      return;
     }
   }
   copy_out(name, out, out_size);
@@ -256,7 +362,17 @@ void browse_name(const browse_t *b, const library_t *lib, char *out,
 
 void browse_item(const browse_t *b, const library_t *lib, uint32_t index,
                  char *out, size_t out_size) {
-  copy_out(b != NULL ? item_text(level_of(b), lib, index) : "", out, out_size);
+  if (b == NULL) {
+    copy_out("", out, out_size);
+    return;
+  }
+  const browse_level_t *level = level_of(b);
+  if (level->screen == BROWSE_PLAYLISTS && index != 0 &&
+      catalog_of(b->playlists) != NULL) {
+    playlist_catalog_name(catalog_of(b->playlists), index - 1, out, out_size);
+    return;
+  }
+  copy_out(item_text(level, lib, b->playlists, index), out, out_size);
 }
 
 bool browse_is_alphabetical(const browse_t *b) {
@@ -268,6 +384,7 @@ bool browse_is_alphabetical(const browse_t *b) {
   case BROWSE_ARTIST: // see AN ARTIST'S LEVEL AND LETTER JUMPS
   case BROWSE_ALBUMS:
   case BROWSE_SONGS:
+  case BROWSE_PLAYLISTS: // see THE PLAYLIST SCREENS
     return true;
   default:
     return false;
@@ -279,11 +396,12 @@ char browse_group(const browse_t *b, const library_t *lib, uint32_t index) {
     return '#';
   }
   const browse_level_t *level = level_of(b);
-  if (level->screen == BROWSE_ARTIST && index == 0) {
-    return '#';
+  if ((level->screen == BROWSE_ARTIST || level->screen == BROWSE_PLAYLISTS) &&
+      index == 0) {
+    return '#'; // "All songs" or "New playlist"
   }
   // Only the first character is read, there and then.
-  return menu_group(item_text(level, lib, index));
+  return menu_group(item_text(level, lib, b->playlists, index));
 }
 
 // Put a new level on the stack and count it. False if the stack is full,
@@ -302,26 +420,15 @@ static bool open_level(browse_t *b, const library_t *lib,
   return true;
 }
 
-// What it asks the index before it acts (opening a level then counts the
-// new level, one query more):
-//   Main, Settings  nothing
-//   Artists         library_artist_albums: is there such an artist?
-//   an artist       library_artist_albums: the artist, and which album
-//   Albums          library_album_by_name: which album
-//   a track         tracklist_track: is there a track at this position?
-browse_result_t browse_select(browse_t *b, const library_t *lib) {
+// A row with no target: what the fixed menus, "All songs" and "New
+// playlist" do. What it asks the index: for "All songs",
+// library_artist_albums (is there such an artist?); nothing otherwise.
+static browse_result_t select_untargeted(browse_t *b, const library_t *lib,
+                                         const browse_level_t *level,
+                                         uint32_t cursor) {
   browse_result_t result = {.action = BROWSE_NOTHING,
                             .list = {.kind = TRACKLIST_NONE, .id = 0},
                             .index = 0};
-  if (b == NULL) {
-    return result;
-  }
-  browse_level_t *level = current(b);
-  uint32_t cursor = level->menu.cursor;
-  if (cursor >= level->menu.count) {
-    return result; // an empty list
-  }
-
   bool opened = false;
   switch (level->screen) {
   case BROWSE_MAIN:
@@ -337,6 +444,9 @@ browse_result_t browse_select(browse_t *b, const library_t *lib) {
       break;
     case MAIN_SONGS:
       opened = open_level(b, lib, BROWSE_SONGS, 0);
+      break;
+    case MAIN_PLAYLISTS:
+      opened = open_level(b, lib, BROWSE_PLAYLISTS, 0);
       break;
     case MAIN_SETTINGS:
       opened = open_level(b, lib, BROWSE_SETTINGS, 0);
@@ -362,52 +472,81 @@ browse_result_t browse_select(browse_t *b, const library_t *lib) {
     }
     break;
 
-  case BROWSE_ARTISTS: {
-    uint32_t first, albums;
-    library_artist_albums(lib, cursor, &first, &albums);
-    if (albums != 0) {
-      opened = open_level(b, lib, BROWSE_ARTIST, cursor);
-    }
-    break;
-  }
-
-  case BROWSE_ARTIST: {
-    uint32_t first, albums;
-    library_artist_albums(lib, level->id, &first, &albums);
-    if (albums == 0) {
-      break; // no such artist in this index
-    }
+  case BROWSE_ARTIST:
     if (cursor == 0) {
-      opened = open_level(b, lib, BROWSE_ARTIST_SONGS, level->id);
-    } else if (cursor - 1 < albums) {
-      opened = open_level(b, lib, BROWSE_ALBUM, first + (cursor - 1));
+      uint32_t first, albums;
+      library_artist_albums(lib, level->id, &first, &albums);
+      if (albums != 0) { // there is such an artist in this index
+        opened = open_level(b, lib, BROWSE_ARTIST_SONGS, level->id);
+      }
     }
     break;
-  }
 
-  case BROWSE_ALBUMS: {
-    uint32_t album = library_album_by_name(lib, cursor);
-    if (album != UINT32_MAX) {
-      opened = open_level(b, lib, BROWSE_ALBUM, album);
+  case BROWSE_PLAYLISTS:
+    if (cursor == 0 && catalog_of(b->playlists) != NULL) {
+      result.action = BROWSE_NEW_PLAYLIST;
     }
     break;
-  }
 
-  case BROWSE_ARTIST_SONGS:
-  case BROWSE_ALBUM:
-  case BROWSE_SONGS: {
-    // The list to play is the list on the screen, from the row selected.
-    tracklist_t list = tracks_of(level);
-    if (tracklist_track(lib, list, cursor) != UINT32_MAX) {
-      result.action = BROWSE_PLAY;
-      result.list = list;
-      result.index = cursor;
-    }
-    break;
-  }
+  default:
+    break; // every other row has a target, or is nothing
   }
   if (opened) {
     result.action = BROWSE_ENTERED;
+  }
+  return result;
+}
+
+// What it asks the index before it acts is what browse_target asks, and for
+// a row with no target what select_untargeted asks; opening a level then
+// counts the new level, one query more. An entry asks library_track_count.
+browse_result_t browse_select(browse_t *b, const library_t *lib) {
+  browse_result_t result = {.action = BROWSE_NOTHING,
+                            .list = {.kind = TRACKLIST_NONE, .id = 0},
+                            .index = 0};
+  if (b == NULL) {
+    return result;
+  }
+  const browse_level_t *level = current(b);
+  uint32_t cursor = level->menu.cursor;
+  if (cursor >= level->menu.count) {
+    return result; // an empty list
+  }
+
+  browse_target_t target = browse_target(b, lib);
+  switch (target.kind) {
+  case BROWSE_TARGET_TRACK:
+    // The list to play is the list on the screen, from the row selected.
+    result.action = BROWSE_PLAY;
+    result.list = target.list;
+    result.index = target.index;
+    break;
+  case BROWSE_TARGET_ALBUM:
+    if (open_level(b, lib, BROWSE_ALBUM, target.list.id)) {
+      result.action = BROWSE_ENTERED;
+    }
+    break;
+  case BROWSE_TARGET_ARTIST:
+    if (open_level(b, lib, BROWSE_ARTIST, target.list.id)) {
+      result.action = BROWSE_ENTERED;
+    }
+    break;
+  case BROWSE_TARGET_PLAYLIST:
+    if (open_level(b, lib, BROWSE_PLAYLIST, target.index)) {
+      result.action = BROWSE_OPEN_PLAYLIST;
+      result.index = target.index;
+    }
+    break;
+  case BROWSE_TARGET_ENTRY:
+    result.action = entry_plays(b->playlists, lib, target.index)
+                        ? BROWSE_PLAY_ENTRIES
+                        : BROWSE_MISSING;
+    result.index = target.index;
+    break;
+  case BROWSE_TARGET_NONE:
+  case BROWSE_TARGET_NOW_PLAYING: // never given; as NONE
+    result = select_untargeted(b, lib, level, cursor);
+    break;
   }
   return result;
 }
@@ -418,8 +557,9 @@ browse_result_t browse_select(browse_t *b, const library_t *lib) {
 //   an artist       library_artist_albums: the artist, and which album
 //   Albums          library_album_by_name: which album
 //   a track         tracklist_track: is there a track at this position?
-// The same questions as browse_select, so what the options menu is offered
-// for is what selecting the row would open or play.
+//   Playlists, a playlist   nothing
+// browse_select acts on what this finds, so what the options menu is
+// offered for is what selecting the row would open or play.
 browse_target_t browse_target(const browse_t *b, const library_t *lib) {
   browse_target_t target = {.kind = BROWSE_TARGET_NONE,
                             .list = {.kind = TRACKLIST_NONE, .id = 0},
@@ -482,6 +622,24 @@ browse_target_t browse_target(const browse_t *b, const library_t *lib) {
     }
     break;
   }
+
+  case BROWSE_PLAYLISTS: {
+    // Row 0 is "New playlist", which is not a thing to act on.
+    const playlist_catalog_t *catalog = catalog_of(b->playlists);
+    if (cursor != 0 && catalog != NULL && cursor - 1 < catalog->count) {
+      target.kind = BROWSE_TARGET_PLAYLIST;
+      target.index = cursor - 1;
+    }
+    break;
+  }
+
+  case BROWSE_PLAYLIST:
+    // Missing entries too: they can be moved and removed.
+    if (has_entry(level, b->playlists, cursor)) {
+      target.kind = BROWSE_TARGET_ENTRY;
+      target.index = cursor;
+    }
+    break;
   }
   return target;
 }

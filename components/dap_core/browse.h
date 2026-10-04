@@ -2,6 +2,8 @@
 
 #include "library.h"
 #include "menu.h"
+#include "playlist.h"
+#include "playlist_catalog.h"
 #include "tracklist.h"
 #include <stdbool.h>
 #include <stddef.h>
@@ -9,13 +11,16 @@
 
 // The menu tree. It is a stack of levels, each a list with its own cursor,
 // so that going back returns to where the user was. It holds numbers, never
-// text or pointers: every call that needs the index is given it, and may be
-// given NULL when there is none.
+// text or pointers into the index: every call that needs the index is given
+// it, and may be given NULL when there is none. The one pointer it keeps is
+// to what the playlist screens show (browse_playlists_t), which belongs to
+// the caller.
 
 #define BROWSE_DEPTH_MAX 5
 
 typedef enum {
-  BROWSE_MAIN,         // Now Playing, Artists, Albums, Songs, Settings
+  BROWSE_MAIN,         // Now Playing, Artists, Albums, Songs, Playlists,
+                       // Settings
   BROWSE_ARTISTS,      // every artist, A to Z
   BROWSE_ARTIST,       // id = artist: "All songs", then the artist's albums
   BROWSE_ARTIST_SONGS, // id = artist: all the artist's tracks
@@ -23,6 +28,9 @@ typedef enum {
   BROWSE_ALBUM,        // id = album: its tracks
   BROWSE_SONGS,        // every song, A to Z
   BROWSE_SETTINGS,     // Rescan library, Keypad test, About
+  BROWSE_PLAYLISTS,    // "New playlist", then every playlist A to Z
+  BROWSE_PLAYLIST,     // id = the playlist's number in the catalog: its
+                       // entries
 } browse_screen_t;
 
 typedef struct {
@@ -31,9 +39,20 @@ typedef struct {
   menu_t menu;
 } browse_level_t;
 
+// What the playlist screens show. It belongs to the caller, who keeps it up
+// to date and tells browse with browse_refresh; browse only reads it.
+typedef struct {
+  const playlist_catalog_t *catalog; // NULL: no listing yet
+  const uint16_t *tracks; // the open playlist's entries, PLAYLIST_MISSING
+                          // for a missing one; NULL while it loads
+  uint32_t count;
+  uint32_t playlist; // which catalog entry `tracks` belongs to
+} browse_playlists_t;
+
 typedef struct {
   browse_level_t levels[BROWSE_DEPTH_MAX];
-  int depth; // index of the current level
+  int depth;                           // index of the current level
+  const browse_playlists_t *playlists; // NULL until browse_set_playlists
 } browse_t;
 
 typedef enum {
@@ -44,6 +63,11 @@ typedef enum {
   BROWSE_RESCAN,
   BROWSE_KEYTEST,
   BROWSE_ABOUT,
+  BROWSE_NEW_PLAYLIST,  // "New playlist" was chosen
+  BROWSE_OPEN_PLAYLIST, // a playlist's level is now current; `index` is its
+                        // number in the catalog: load its entries
+  BROWSE_PLAY_ENTRIES,  // play the open playlist from entry `index`
+  BROWSE_MISSING,       // the entry chosen is missing: nothing to play
 } browse_action_t;
 
 typedef struct {
@@ -53,10 +77,14 @@ typedef struct {
 } browse_result_t;
 
 typedef enum {
-  BROWSE_TARGET_NONE,   // nothing the options menu applies to
-  BROWSE_TARGET_TRACK,  // `list` and `index` say which
-  BROWSE_TARGET_ALBUM,  // `list` is the album
-  BROWSE_TARGET_ARTIST, // `list` is all the artist's tracks
+  BROWSE_TARGET_NONE,        // nothing the options menu applies to
+  BROWSE_TARGET_TRACK,       // `list` and `index` say which
+  BROWSE_TARGET_ALBUM,       // `list` is the album
+  BROWSE_TARGET_ARTIST,      // `list` is all the artist's tracks
+  BROWSE_TARGET_PLAYLIST,    // `index` is the playlist's number in the catalog
+  BROWSE_TARGET_ENTRY,       // `index` is the entry in the open playlist
+  BROWSE_TARGET_NOW_PLAYING, // for options_for only; browse_target never
+                             // gives it
 } browse_target_kind_t;
 
 typedef struct {
@@ -65,12 +93,17 @@ typedef struct {
   uint32_t index; // for a track: its position in `list`
 } browse_target_t;
 
-// Start at the main menu.
+// Start at the main menu, with no playlists attached.
 void browse_init(browse_t *b);
 
-// Bring the current level's item count up to date with `lib`. Call after
-// anything that could have changed it. With a NULL library every library
-// list is empty.
+// Attach what the playlist screens show (NULL: nothing). Only the pointer is
+// kept; call browse_refresh after it changes.
+void browse_set_playlists(browse_t *b, const browse_playlists_t *p);
+
+// Bring the current level's item count up to date with `lib`, and the
+// counts of any playlist levels on the stack with the attached playlists.
+// Call after anything that could have changed them. With a NULL library
+// every library list is empty.
 void browse_refresh(browse_t *b, const library_t *lib);
 
 // The index has been replaced: numbers on the stack no longer mean what they
@@ -81,7 +114,8 @@ void browse_library_changed(browse_t *b);
 menu_t *browse_menu(browse_t *b);
 
 // The current level's name for the top row: "Main", "Artists", an artist's
-// or an album's name, "Albums", "Songs", "Settings". Always terminated.
+// or an album's name, "Albums", "Songs", "Settings", "Playlists", a
+// playlist's name. Always terminated.
 void browse_name(const browse_t *b, const library_t *lib, char *out,
                  size_t out_size);
 

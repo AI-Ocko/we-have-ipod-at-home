@@ -51,6 +51,16 @@ void play_queue_clear(play_queue_t *q);
 uint32_t play_queue_load(play_queue_t *q, const library_t *lib,
                          tracklist_t list, uint32_t start);
 
+// Replace the queue with the entries of `tracks` that are below
+// `index_tracks` (the others, such as a playlist's missing entries, are left
+// out), current at the one at position `start`. With shuffle on the rest is
+// shuffled and the chosen track is first. Returns how many were taken; 0,
+// and the queue unchanged, if `start` is not below `count` or tracks[start]
+// is left out.
+uint32_t play_queue_load_tracks(play_queue_t *q, const uint16_t *tracks,
+                                uint32_t count, uint32_t start,
+                                uint32_t index_tracks);
+
 // Add after the current track / at the end. With an empty queue either makes
 // the track current. Return how many were added: all of `list` or none
 // (false / 0 if they do not fit).

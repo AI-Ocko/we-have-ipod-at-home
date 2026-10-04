@@ -359,6 +359,14 @@ static void ui_select(ui_t *ui, char key, int64_t now_us) {
   case BROWSE_ABOUT:
     ui->mode = UI_MODE_ABOUT;
     break;
+  case BROWSE_NEW_PLAYLIST:
+  case BROWSE_OPEN_PLAYLIST:
+  case BROWSE_PLAY_ENTRIES:
+  case BROWSE_MISSING:
+    // Stage 7 Task 5 wires the playlist screens. Until then no playlists
+    // are attached to the browse stack, so the main menu's Playlists row
+    // opens an empty list and none of these can happen.
+    break;
   }
 }
 

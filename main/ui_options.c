@@ -89,6 +89,19 @@ static void choose(ui_t *ui, int64_t now_us) {
                         : UI_OVERLAY_QUEUE_FULL,
                     now_us);
     break;
+  case OPTION_ADD_TO_PLAYLIST:
+  case OPTION_RENAME:
+  case OPTION_DELETE:
+  case OPTION_MOVE_UP:
+  case OPTION_MOVE_DOWN:
+  case OPTION_REMOVE:
+  case OPTION_SAVE_QUEUE:
+    // The playlist actions do nothing yet: stage 7 Task 5 wires them. Until
+    // then "Add to playlist" is offered on tracks, albums and artists and
+    // choosing it leaves the menu open with nothing changed.
+    break;
+  case OPTION_COUNT:
+    break; // not an option
   }
   library_task_put();
   if (play) {

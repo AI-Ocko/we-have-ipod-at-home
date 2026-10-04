@@ -18,6 +18,9 @@
 //   current, next, previous, set position, append: a few instructions.
 //   load, append a list: one pass over the list, one query of the index per
 //     track, and for a load one copy of n entries.
+//   load from an array of tracks: one pass over the array, no query of the
+//     index, one copy of n entries (three if the array is longer than the
+//     queue: see play_queue_load_tracks).
 //   shuffle on: one pass, one random number and one swap per track.
 //   shuffle off: one copy of n entries, and a search of the original order
 //     for the current track: the queue does not store where each shuffled
@@ -187,6 +190,19 @@ void play_queue_clear(play_queue_t *q) {
   q->position = 0;
 }
 
+// The last step of every load: the `take` tracks are in the original order;
+// the play order is the same, current at `position`, and shuffled around it
+// if shuffle is on.
+static uint32_t finish_load(play_queue_t *q, uint32_t take, uint32_t position) {
+  memcpy(q->play, q->original, take * sizeof(uint16_t));
+  q->count = take;
+  q->position = position;
+  if (q->shuffle) {
+    shuffle_around_current(q);
+  }
+  return take;
+}
+
 uint32_t play_queue_load(play_queue_t *q, const library_t *lib,
                          tracklist_t list, uint32_t start) {
   play_queue_clear(q);
@@ -212,13 +228,55 @@ uint32_t play_queue_load(play_queue_t *q, const library_t *lib,
     }
     q->original[i] = (uint16_t)track;
   }
-  memcpy(q->play, q->original, take * sizeof(uint16_t));
-  q->count = take;
-  q->position = start - first;
-  if (q->shuffle) {
-    shuffle_around_current(q);
+  return finish_load(q, take, start - first);
+}
+
+// The tracks taken are the window play_queue_load takes, over the entries
+// that are kept: the chosen one and those after it, and if they do not fill
+// the queue, those just before it. How many entries are kept is not known
+// until the end, so the window is found in the one pass: the kept entries
+// are written round the original order as a ring, and the pass stops once
+// the chosen one and `capacity - 1` after it are in. The ring then holds
+// the last `capacity` kept entries (or all of them), which is the window.
+// Only if the ring went round is it turned to start at its oldest entry:
+// one rotation of at most `capacity` entries, through the play order.
+uint32_t play_queue_load_tracks(play_queue_t *q, const uint16_t *tracks,
+                                uint32_t count, uint32_t start,
+                                uint32_t index_tracks) {
+  if (tracks == NULL || start >= count || tracks[start] >= index_tracks ||
+      q->capacity == 0) {
+    return 0;
   }
-  return take;
+  uint16_t *ring = q->original;
+  uint32_t cap = q->capacity;
+  uint32_t kept = 0;   // entries kept so far
+  uint32_t at = 0;     // where the next one goes: kept modulo cap
+  uint32_t chosen = 0; // the chosen entry's number among the kept
+  for (uint32_t i = 0; i < count; i++) {
+    uint16_t track = tracks[i];
+    if (track >= index_tracks) {
+      continue;
+    }
+    if (i == start) {
+      chosen = kept;
+    }
+    ring[at] = track;
+    at = at + 1 < cap ? at + 1 : 0;
+    kept++;
+    if (i >= start && kept - chosen == cap) {
+      break; // the queue is full from the chosen entry on
+    }
+  }
+  uint32_t take = kept < cap ? kept : cap;
+  uint32_t oldest = kept - take; // the kept entry that is first in the queue
+  if (kept > cap && at != 0) {
+    // The oldest is at `at`: the ring from there to its end comes first.
+    uint32_t tail = cap - at;
+    memcpy(q->play, ring + at, tail * sizeof(uint16_t));
+    memcpy(q->play + tail, ring, at * sizeof(uint16_t));
+    memcpy(ring, q->play, cap * sizeof(uint16_t));
+  }
+  return finish_load(q, take, chosen - oldest);
 }
 
 bool play_queue_insert_next(play_queue_t *q, uint32_t track) {
