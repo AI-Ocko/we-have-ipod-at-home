@@ -1,0 +1,11 @@
+#EXTM3U
+#EXTINF:100,Radiohead - Everything
+../Radiohead/Kid A/01 Everything.flac
+#EXTINF:100,Bjork - Hunter
+
+../Bjork/Homogenic/01 Hunter.flac
+../Queen/Hits/01 Bohemian.mp3
+#EXTINF:131,Nobody - Gone
+../Gone/missing.mp3
+# a comment after the last entry
+
