@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 
 // The fixtures are written by tools/make_test_playlists.py, which says what
 // each one holds. Their paths name the tracks of lib16.h, taken as paths from
@@ -1054,6 +1055,53 @@ void test_edit_io_error_on_write(void) {
   FILE *ok_out = keep(tmpfile());
   e = remove_edit(0);
   TEST_ASSERT_EQUAL(PLAYLIST_IO_ERROR, edit_list(in, ok_out, &e));
+
+  // An edit may read its input twice, so a stream that cannot seek (a pipe)
+  // is refused before anything is read or written.
+  int fds[2];
+  TEST_ASSERT_EQUAL_INT(0, pipe(fds));
+  TEST_ASSERT_EQUAL(5, write(fds[1], "../a\n", 5));
+  close(fds[1]);
+  FILE *pipe_in = keep(fdopen(fds[0], "rb"));
+  TEST_ASSERT_EQUAL(PLAYLIST_IO_ERROR, edit_to_got(pipe_in, &e));
+  TEST_ASSERT_EQUAL_size_t(0, got_len);
+}
+
+// An edit refuses what a read refuses, writing nothing, as far as it reads:
+// a REMOVE or a MOVE reads no further than the blocks it changes and copies
+// the rest as it is.
+void test_edit_refuses_a_line_that_is_too_long(void) {
+  const uint16_t add[] = {lib16(0)};
+  playlist_edit_t e = append_edit(add, 1);
+  TEST_ASSERT_EQUAL(PLAYLIST_BAD_FILE,
+                    edit_to_got(fixture(FIXTURE("too_long.m3u")), &e));
+  TEST_ASSERT_EQUAL_size_t(0, got_len);
+  e = remove_edit(2);
+  TEST_ASSERT_EQUAL(PLAYLIST_BAD_FILE,
+                    edit_to_got(fixture(FIXTURE("too_long.m3u")), &e));
+  TEST_ASSERT_EQUAL_size_t(0, got_len);
+  load_fixture(FIXTURE("too_long.m3u"));
+  e = remove_edit(0);
+  TEST_ASSERT_EQUAL(PLAYLIST_OK, edit_to_got(file_of_src(), &e));
+  want_clear();
+  want_src(strlen("../Radiohead/Kid A/01 Everything.flac\n"), src_len);
+  assert_got_want();
+  tearDown();
+
+  // One huge line.
+  FILE *in = file_with_line("", 5 * PLAYLIST_WORK_BYTES, "");
+  e = append_edit(add, 1);
+  TEST_ASSERT_EQUAL(PLAYLIST_BAD_FILE, edit_to_got(in, &e));
+  TEST_ASSERT_EQUAL_size_t(0, got_len);
+  rewind(in);
+  e = remove_edit(0);
+  TEST_ASSERT_EQUAL(PLAYLIST_BAD_FILE, edit_to_got(in, &e));
+  TEST_ASSERT_EQUAL_size_t(0, got_len);
+
+  // An empty file has no entry to remove.
+  TEST_ASSERT_EQUAL(PLAYLIST_NO_ENTRY,
+                    edit_to_got(fixture(FIXTURE("empty.m3u")), &e));
+  TEST_ASSERT_EQUAL_size_t(0, got_len);
 }
 
 void test_device_file_reads_back_as_written(void) {
@@ -1169,6 +1217,7 @@ int main(void) {
   RUN_TEST(test_edits_keep_every_other_byte);
   RUN_TEST(test_edit_across_block_edges);
   RUN_TEST(test_edit_io_error_on_write);
+  RUN_TEST(test_edit_refuses_a_line_that_is_too_long);
   RUN_TEST(test_device_file_reads_back_as_written);
   RUN_TEST(test_thousand_entries_timing);
   return UNITY_END();
