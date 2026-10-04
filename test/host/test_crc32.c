@@ -19,7 +19,7 @@ static uint32_t crc32_bitwise(const uint8_t *p, size_t n) {
   return ~crc;
 }
 
-// Every byte value at least twice, in an order that is not a simple count.
+// Every byte value once, then more bytes in no simple order.
 static uint8_t bytes[600];
 
 static void fill_bytes(void) {
