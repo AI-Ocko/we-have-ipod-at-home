@@ -8,8 +8,8 @@
 // LINES. A line ends at an LF. Its text is the line without the LF, without
 // a CR before it, and, for the first line of the file, without a UTF-8
 // byte-order mark. A line whose text is longer than PLAYLIST_LINE_MAX makes
-// the file a bad one. An entry is a line whose text is not empty and does not
-// start with '#'. A last line with no LF after it is a line like any other
+// the file a bad one. An entry is a line whose text is not blank (empty, or
+// only spaces and tabs) and does not start with '#'. A last line with no LF after it is a line like any other
 // (a lone CR at its end is dropped as well).
 //
 // THE WORK AREA. The streams this module is handed are, on the device,
@@ -44,7 +44,10 @@
 // in the window. A bigger one is read again from its start (fseek), which
 // for a 1,000-entry file of about 40 KB is a few more reads. A REMOVE or a
 // MOVE stops the first pass at the last block it needs; an APPEND reads to
-// the end, as it must count every entry.
+// the end, as it must count every entry. So a REMOVE or a MOVE does not see
+// a line that is too long after its blocks: it copies it as it is rather
+// than refusing the file (accepted: playlist_read refuses such a file, so
+// the interface never offers to edit it).
 //
 // The input must therefore be seekable, and it is read from where it stands
 // when playlist_edit is called (a byte-order mark is looked for there).
@@ -103,6 +106,8 @@ static bool starts_with(const unsigned char *p, size_t len,
   }
   return true;
 }
+
+static bool is_blank(const unsigned char *text, size_t len);
 
 // --- Paths ---------------------------------------------------------------------
 
@@ -232,7 +237,7 @@ static bool is_other_url(const unsigned char *p, size_t len) {
 uint32_t playlist_line_paths(const char *line, size_t len,
                              char paths[2][PLAYLIST_PATH_MAX]) {
   const unsigned char *p = (const unsigned char *)line;
-  if (len == 0 || p[0] == '#') {
+  if (len == 0 || p[0] == '#' || is_blank(p, len)) {
     return 0;
   }
   source_t s = {.p = p, .i = 0, .n = len, .url = false};
@@ -404,8 +409,18 @@ static void line_text(const line_t *line, const unsigned char **text,
   *len = n;
 }
 
+// Empty, or only spaces and tabs: a line that looks empty is not an entry.
+static bool is_blank(const unsigned char *text, size_t len) {
+  for (size_t i = 0; i < len; i++) {
+    if (text[i] != ' ' && text[i] != '\t') {
+      return false;
+    }
+  }
+  return true;
+}
+
 static inline bool is_entry(const unsigned char *text, size_t len) {
-  return len > 0 && text[0] != '#';
+  return !is_blank(text, len) && text[0] != '#';
 }
 
 playlist_result_t playlist_read(FILE *in, const library_t *lib,

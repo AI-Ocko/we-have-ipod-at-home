@@ -462,8 +462,9 @@ void test_read_rejects_a_line_that_is_too_long(void) {
 
 void test_read_binary_junk_is_all_missing(void) {
   load_fixture(FIXTURE("junk.m3u"));
-  // The entries, counted here by the rule: lines that are not empty (once a
-  // CR before the LF is taken off) and do not start with '#'.
+  // The entries, counted here by the rule: lines that are not blank (once a
+  // CR before the LF is taken off: empty, or only spaces and tabs) and do
+  // not start with '#'.
   uint32_t entries = 0;
   size_t start = 0;
   for (size_t i = 0; i <= src_len; i++) {
@@ -472,7 +473,11 @@ void test_read_binary_junk_is_all_missing(void) {
       if (len > 0 && src[start + len - 1] == '\r') {
         len--;
       }
-      if (len > 0 && src[start] != '#') {
+      bool blank = true;
+      for (size_t b = 0; b < len; b++) {
+        blank = blank && (src[start + b] == ' ' || src[start + b] == '\t');
+      }
+      if (!blank && src[start] != '#') {
         entries++;
       }
       start = i + 1;
@@ -1104,6 +1109,109 @@ void test_edit_refuses_a_line_that_is_too_long(void) {
   TEST_ASSERT_EQUAL_size_t(0, got_len);
 }
 
+// A line of only spaces and tabs looks empty and is not an entry; an edit
+// keeps it, as part of the next entry's block like any other such line.
+void test_blank_lines_are_not_entries(void) {
+  assert_paths(" ", 0, NULL, NULL);
+  assert_paths(" \t  \t", 0, NULL, NULL);
+  assert_paths(" ../Radiohead/Kid A/01 Everything.flac", 2,
+               " ../Radiohead/Kid A/01 Everything.flac",
+               "playlists/ ../Radiohead/Kid A/01 Everything.flac");
+
+  const char text[] = "\xef\xbb\xbf \t\r\n"
+                      "../Bjork/Homogenic/01 Hunter.flac\n"
+                      "   \n"
+                      "\t\n"
+                      " \t \r\n"
+                      "../Queen/Hits/01 Bohemian.mp3\r\n"
+                      "  ";
+  FILE *in = file_of(text, sizeof(text) - 1);
+  TEST_ASSERT_EQUAL(PLAYLIST_OK,
+                    read_list(in, tracks, PLAYLIST_ENTRIES_MAX, &count));
+  const uint16_t expected[] = {lib16(5), lib16(10)};
+  assert_tracks(expected, 2);
+
+  const struct {
+    const char *in;
+    playlist_edit_t edit;
+    const char *out;
+  } cases[] = {
+      {"../a\n \t\n../b\n", {.kind = PLAYLIST_EDIT_MOVE_UP, .entry = 1},
+       " \t\n../b\n../a\n"},
+      {"../a\n \t\n../b\n", {.kind = PLAYLIST_EDIT_REMOVE, .entry = 1},
+       "../a\n"},
+      {"../a\n \t\n../b\n  \n", {.kind = PLAYLIST_EDIT_REMOVE, .entry = 0},
+       " \t\n../b\n  \n"},
+      {"../a\n../b\n\t\n", {.kind = PLAYLIST_EDIT_MOVE_DOWN, .entry = 0},
+       "../b\n../a\n\t\n"},
+  };
+  for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+    TEST_ASSERT_EQUAL(PLAYLIST_OK,
+                      edit_to_got(file_of(cases[i].in, strlen(cases[i].in)),
+                                  &cases[i].edit));
+    want_clear();
+    want_str(cases[i].out);
+    assert_got_want();
+    tearDown();
+  }
+  // A blank line does not count toward the limit either.
+  playlist_edit_t up = up_edit(2);
+  TEST_ASSERT_EQUAL(PLAYLIST_NO_ENTRY,
+                    edit_to_got(file_of("../a\n \n../b\n", 12), &up));
+}
+
+// Only an APPEND is refused at the limit: a file already over it (1,003
+// entries) can still have entries removed and moved, and only the edited
+// blocks change.
+void test_remove_and_move_work_over_the_limit(void) {
+  load_fixture(FIXTURE("over_limit.m3u"));
+  // Where each entry's line starts; one line per entry, the last at 1,002.
+  static size_t starts[1004];
+  size_t n = 0;
+  starts[n++] = 0;
+  for (size_t i = 0; i < src_len; i++) {
+    if (src[i] == '\n') {
+      starts[n++] = i + 1;
+    }
+  }
+  TEST_ASSERT_EQUAL_size_t(1004, n); // 1,003 starts and the end
+  const uint32_t picks[] = {0, 500, 999, 1000, 1002};
+  for (size_t p = 0; p < sizeof(picks) / sizeof(picks[0]); p++) {
+    uint32_t k = picks[p];
+    playlist_edit_t rm = remove_edit(k);
+    TEST_ASSERT_EQUAL(PLAYLIST_OK, edit_to_got(file_of_src(), &rm));
+    want_clear();
+    want_src(0, starts[k]);
+    want_src(starts[k + 1], src_len);
+    assert_got_want();
+    if (k > 0) {
+      playlist_edit_t up = up_edit(k);
+      TEST_ASSERT_EQUAL(PLAYLIST_OK, edit_to_got(file_of_src(), &up));
+      want_clear();
+      want_src(0, starts[k - 1]);
+      want_src(starts[k], starts[k + 1]);
+      want_src(starts[k - 1], starts[k]);
+      want_src(starts[k + 1], src_len);
+      assert_got_want();
+    }
+    if (k < 1002) {
+      playlist_edit_t down = down_edit(k);
+      TEST_ASSERT_EQUAL(PLAYLIST_OK, edit_to_got(file_of_src(), &down));
+      want_clear();
+      want_src(0, starts[k]);
+      want_src(starts[k + 1], starts[k + 2]);
+      want_src(starts[k], starts[k + 1]);
+      want_src(starts[k + 2], src_len);
+      assert_got_want();
+    }
+    tearDown();
+  }
+  // Entry 1,003 does not exist.
+  playlist_edit_t rm = remove_edit(1003);
+  TEST_ASSERT_EQUAL(PLAYLIST_NO_ENTRY, edit_to_got(file_of_src(), &rm));
+  TEST_ASSERT_EQUAL_size_t(0, got_len);
+}
+
 void test_device_file_reads_back_as_written(void) {
   static uint16_t add[TRACKS * 3];
   for (uint32_t i = 0; i < TRACKS * 3; i++) {
@@ -1218,6 +1326,8 @@ int main(void) {
   RUN_TEST(test_edit_across_block_edges);
   RUN_TEST(test_edit_io_error_on_write);
   RUN_TEST(test_edit_refuses_a_line_that_is_too_long);
+  RUN_TEST(test_blank_lines_are_not_entries);
+  RUN_TEST(test_remove_and_move_work_over_the_limit);
   RUN_TEST(test_device_file_reads_back_as_written);
   RUN_TEST(test_thousand_entries_timing);
   return UNITY_END();

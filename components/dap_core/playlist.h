@@ -27,8 +27,10 @@ typedef enum {
   PLAYLIST_OK,
   PLAYLIST_TRUNCATED, // read: more than PLAYLIST_ENTRIES_MAX entries; the
                       // first PLAYLIST_ENTRIES_MAX were read
-  PLAYLIST_FULL,      // edit: the result would have more than
-                      // PLAYLIST_ENTRIES_MAX entries; nothing was written
+  PLAYLIST_FULL,      // edit: an APPEND would leave more than
+                      // PLAYLIST_ENTRIES_MAX entries; nothing was written.
+                      // Only APPEND is refused this way: REMOVE and MOVE
+                      // work on a file that is already over the limit
   PLAYLIST_NO_ENTRY,  // edit: the entry named does not exist, or cannot
                       // move that way; nothing was written
   PLAYLIST_BAD_FILE,  // a line longer than PLAYLIST_LINE_MAX
@@ -68,6 +70,9 @@ typedef struct {
 // Appended tracks are written as "../" and their path in `lib`, one per
 // line, LF. On any result but PLAYLIST_OK what was written to `out` must be
 // thrown away.
+//
+// `in` is read from its current position and must be seekable (the edit
+// may read it twice); a stream that cannot seek gives PLAYLIST_IO_ERROR.
 playlist_result_t playlist_edit(FILE *in, FILE *out, const library_t *lib,
                                 const playlist_edit_t *edit,
                                 playlist_work_t *work);
