@@ -246,8 +246,16 @@ playlist_name_t playlist_name_check(const char *typed, char *out) {
   }
   // The card's file system drops a final '.', so "ROCK." would be saved as
   // "ROCK" and then be another playlist's name.
+  // Checked before the start, so a name that does both (".", ".A.") is
+  // BAD_END.
   if (out[len - 1] == '.') {
     return PLAYLIST_NAME_BAD_END;
+  }
+  // A file name starting with '.' is hidden: playlist_catalog_add refuses
+  // it, so the playlist would never be listed and "Name in use" could not
+  // see it.
+  if (out[0] == '.') {
+    return PLAYLIST_NAME_BAD_START;
   }
   return PLAYLIST_NAME_OK;
 }

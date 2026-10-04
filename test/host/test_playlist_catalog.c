@@ -331,7 +331,16 @@ void test_name_check_each_rule(void) {
   assert_check("ROCK.", PLAYLIST_NAME_BAD_END, NULL);
   assert_check(".", PLAYLIST_NAME_BAD_END, NULL);
   assert_check("ROCK. ", PLAYLIST_NAME_BAD_END, NULL); // after trimming
-  assert_check(".ROCK", PLAYLIST_NAME_OK, ".ROCK");
+  // A file name starting with '.' is hidden and never listed, so a name may
+  // not start with one. Trimming removes only spaces, so ". A" starts with
+  // '.'; "  .A" is ".A" once trimmed.
+  assert_check(".ROCK", PLAYLIST_NAME_BAD_START, NULL);
+  assert_check("...A", PLAYLIST_NAME_BAD_START, NULL);
+  assert_check(". A", PLAYLIST_NAME_BAD_START, NULL);
+  assert_check("  .A", PLAYLIST_NAME_BAD_START, NULL);
+  assert_check("A.B", PLAYLIST_NAME_OK, "A.B");
+  // Both ends: the end is checked first (the order of playlist_name_t).
+  assert_check(".A.", PLAYLIST_NAME_BAD_END, NULL);
 
   // Where more than one rule is broken, the first in the list above wins.
   assert_check("abcdefghijklmnopq", PLAYLIST_NAME_TOO_LONG, NULL);
@@ -347,6 +356,66 @@ void test_name_check_trims_spaces(void) {
   assert_check(" ABCDEFGHIJKLMNOPQ ", PLAYLIST_NAME_TOO_LONG, NULL);
   // Only spaces are trimmed.
   assert_check("\tROCK", PLAYLIST_NAME_BAD_CHAR, NULL);
+}
+
+// Every name the device accepts makes a file the catalog lists and finds:
+// a name that could be typed but never listed would vanish, and "Name in
+// use" could not catch a second one.
+void test_every_accepted_name_is_listed(void) {
+  static const char *const TYPED[] = {
+      "A",
+      "0",
+      "&",
+      "'",
+      "-",
+      " Z ",
+      "ABCDEFGHIJKLMNOP",
+      "0123456789-'& .X",
+      "A.B",
+      "A..B",
+      "A. .B",
+      "M3U",
+      "X.M3U",
+      "X.M3U8",
+      "ROCK & ROLL",
+      "-'&",
+      "   ABCDEFGHIJKLMNOP   ",
+      "A          .   B",
+  };
+  enum { N = sizeof(TYPED) / sizeof(TYPED[0]) };
+  static char names[N][PLAYLIST_NAME_MAX + 1];
+  char file[PLAYLIST_NAME_MAX + 8];
+  for (uint32_t k = 0; k < N; k++) {
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        PLAYLIST_NAME_OK, playlist_name_check(TYPED[k], names[k]), TYPED[k]);
+    playlist_file_for(names[k], file, sizeof(file));
+    TEST_ASSERT_TRUE_MESSAGE(playlist_catalog_add(&cat, file), file);
+  }
+  // Every allowed character, one name each, inside a name.
+  static const char ALLOWED[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 -'&.";
+  static char single[sizeof(ALLOWED)][PLAYLIST_NAME_MAX + 1];
+  uint32_t singles = 0;
+  for (size_t k = 0; ALLOWED[k] != '\0'; k++) {
+    char typed[4] = {'A', ALLOWED[k], 'Z', '\0'};
+    TEST_ASSERT_EQUAL_INT(PLAYLIST_NAME_OK,
+                          playlist_name_check(typed, single[singles]));
+    playlist_file_for(single[singles], file, sizeof(file));
+    TEST_ASSERT_TRUE_MESSAGE(playlist_catalog_add(&cat, file), file);
+    singles++;
+  }
+  playlist_catalog_sort(&cat);
+  uint32_t i;
+  for (uint32_t k = 0; k < N; k++) {
+    TEST_ASSERT_TRUE_MESSAGE(playlist_catalog_find(&cat, names[k], &i),
+                             names[k]);
+    char shown[PLAYLIST_NAME_MAX + 8];
+    playlist_catalog_name(&cat, i, shown, sizeof(shown));
+    TEST_ASSERT_EQUAL_STRING(names[k], shown);
+  }
+  for (uint32_t k = 0; k < singles; k++) {
+    TEST_ASSERT_TRUE_MESSAGE(playlist_catalog_find(&cat, single[k], &i),
+                             single[k]);
+  }
 }
 
 void test_file_for_a_name(void) {
@@ -389,6 +458,7 @@ int main(void) {
   RUN_TEST(test_full_catalog_sets_truncated);
   RUN_TEST(test_name_check_each_rule);
   RUN_TEST(test_name_check_trims_spaces);
+  RUN_TEST(test_every_accepted_name_is_listed);
   RUN_TEST(test_file_for_a_name);
   return UNITY_END();
 }

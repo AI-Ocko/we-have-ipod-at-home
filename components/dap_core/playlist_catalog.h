@@ -49,6 +49,7 @@ typedef enum {
   PLAYLIST_NAME_TOO_LONG, // more than PLAYLIST_NAME_MAX after trimming
   PLAYLIST_NAME_BAD_CHAR, // a character that is not allowed
   PLAYLIST_NAME_BAD_END,  // ends with '.'
+  PLAYLIST_NAME_BAD_START, // starts with '.'
 } playlist_name_t;
 
 // Check a typed name and write the name to use (spaces at both ends
