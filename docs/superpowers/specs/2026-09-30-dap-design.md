@@ -465,23 +465,43 @@ shuffle flag and the loop mode (off, all, one). It holds at most 8,192 tracks.
 
 ## 8. Playlists
 
-Standard M3U files in `/playlists/`, UTF-8, one path per line relative to the
-card root, `#` lines ignored. Files made on a computer are accepted, including
-absolute paths and backslash separators, which are normalised on load.
+Standard M3U files in `/playlists/`, UTF-8, one path per line, `#` lines
+ignored. Files ending `.m3u` or `.m3u8` (any case) are listed, by their name
+without the ending. (Amended in stage 7.) The device writes `<NAME>.m3u` with
+LF line endings and each entry as `../` followed by the track's path, relative
+to the playlist's folder, so that a computer opens the file too.
+
+Files made on a computer are accepted: a byte-order mark and CRLF endings are
+ignored; backslashes count as `/`; an absolute path (a leading `/`, a drive
+letter such as `E:`, or a `file://` URL with its `%XX` escapes decoded) is
+taken from the card root; a relative path is tried from the card root, then
+from `/playlists/`. Letter case is ignored, as the card's file system ignores
+it.
 
 Entries are resolved against the index by path. Entries with no match are kept
-in the file, shown as "(missing)", and skipped in playback.
+in the file, shown as "(missing)", and skipped in playback; choosing one shows
+"File missing".
 
-Every edit is saved immediately by writing `<name>.m3u.tmp` and renaming it
-over the original.
+An entry is its path line together with the comment lines before it (such as
+`#EXTINF`), apart from a first-line `#EXTM3U`. Edits move or remove whole
+entries and keep every other byte of the file as it was.
+
+Every edit is saved immediately by writing `<name>.m3u.tmp` and putting it in
+place with the same power-cut care as the index. All reading and writing of
+playlists is done by a separate low-priority task, so the interface never
+waits on the card.
 
 Operations: create, rename, delete (with confirmation), add track, add all
-tracks of an album or artist, save the current queue as a playlist, remove an
-entry, move an entry up or down.
+tracks of an album or artist, save the current queue as a playlist (in the
+order the tracks were added, the first 1,000), remove an entry, move an entry
+up or down.
 
-Names: capitals, digits, space and `- ' & .`; 1 to 16 characters; must not
-duplicate an existing playlist (shows "Name in use"). Limit: 1,000 entries per
-playlist.
+Names: capitals, digits, space and `- ' & .`; 1 to 16 characters once spaces
+at either end are trimmed; must not end with `.` (the card's file system drops
+it); must not duplicate an existing playlist, ignoring case and the ending
+(shows "Name in use"). Names of computer-made files are shown as they are.
+Limit: 1,000 entries per playlist; a computer-made file with more shows and
+plays its first 1,000 and keeps the rest.
 
 ## 9. User interface
 
@@ -561,7 +581,7 @@ characters (the controller allows eight).
 | Album or artist | Play, Shuffle play, Add to queue, Add to playlist |
 | Playlist | Play, Shuffle play, Rename, Delete |
 | Entry inside a playlist | Play, Move up, Move down, Remove |
-| Now Playing | Add to playlist, Save queue as playlist |
+| Now Playing | Add to playlist, Save queue (as a playlist) |
 
 "Add to playlist" opens the playlist list with "New..." first.
 
