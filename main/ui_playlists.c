@@ -234,13 +234,37 @@ static void say_outcome(ui_t *ui, const playlist_event_t *ev, int64_t now_us) {
 
 // --- requests ----------------------------------------------------------------
 
+// A listing that failed (or could not be asked for) before any listing has
+// arrived: the Playlists screen shows why in place of "Loading", and 5 or 6
+// asks again (ui_pl_retry_listing), so it is never stuck.
+static void listing_failed(ui_t *ui, ui_overlay_t why, int64_t now_us) {
+  say(ui, why, now_us);
+  if (!ui->pl->catalog_ready) {
+    ui->pl->list_failed = true;
+    ui->pl->list_why = why;
+    ui->list_dirty = true;
+  }
+}
+
 void ui_pl_list(ui_t *ui, int64_t now_us) {
   uint32_t request = playlist_task_list(PLAYLIST_CLIENT_UI);
   if (request == 0) {
-    say(ui, UI_OVERLAY_BUSY, now_us);
+    listing_failed(ui, UI_OVERLAY_BUSY, now_us);
     return;
   }
   ui->pl->list_request = request;
+  ui->pl->list_failed = false; // "Loading" again until it comes
+  ui->list_dirty = true;
+}
+
+bool ui_pl_retry_listing(ui_t *ui, int64_t now_us) {
+  const browse_level_t *level = &ui->browse.levels[ui->browse.depth];
+  if (level->screen != BROWSE_PLAYLISTS || ui->pl->catalog_ready ||
+      !ui->pl->list_failed) {
+    return false;
+  }
+  ui_pl_list(ui, now_us);
+  return true;
 }
 
 // Ask for the open playlist's entries. False if refused.
@@ -297,6 +321,7 @@ static void close_open(ui_t *ui) {
   pl->open_file[0] = '\0';
   pl->open_loaded = false;
   pl->load_request = 0;
+  pl->reload_failed = false;
   pl->open_serial++;
   update_view(pl);
 }
@@ -375,13 +400,15 @@ static void move_entry(ui_t *ui, int step, int64_t now_us) {
   ui_pl_t *pl = ui->pl;
   uint32_t entry = ui->options_target.index;
   uint32_t count = pl->open.count;
-  if (!pl->open_loaded || entry >= count) {
+  bool cut = pl->open.truncated;
+  // A playlist cut at 1,000 has entries past the copy: the menu can be on
+  // one of them (moved down from the last entry shown), and a move there
+  // is the file's to make.
+  if (!pl->open_loaded || (entry >= count && !cut)) {
     return;
   }
-  // At either end the move does nothing. Past the last entry the UI has,
-  // a playlist cut at 1,000 has more: that move is the file's to make.
-  bool last = (entry + 1 == count);
-  if ((step < 0 && entry == 0) || (step > 0 && last && !pl->open.truncated)) {
+  // At either end the move does nothing.
+  if ((step < 0 && entry == 0) || (step > 0 && entry + 1 >= count && !cut)) {
     return;
   }
   ui_edit_t *slot = edit_slot(ui);
@@ -403,16 +430,18 @@ static void move_entry(ui_t *ui, int step, int64_t now_us) {
   edit_note(ui, slot, request,
             step < 0 ? PLAYLIST_REQUEST_MOVE_UP : PLAYLIST_REQUEST_MOVE_DOWN,
             flags);
-  if (step > 0 && last) {
-    return; // the entry it swaps with is not in the copy: the reload shows it
-  }
   uint32_t other = step < 0 ? entry - 1 : entry + 1;
-  uint16_t track = pl->open.tracks[entry];
-  pl->open.tracks[entry] = pl->open.tracks[other];
-  pl->open.tracks[other] = track;
-  // The menu stays on the moved entry, and the list under it follows.
+  if (entry < count && other < count) {
+    uint16_t track = pl->open.tracks[entry];
+    pl->open.tracks[entry] = pl->open.tracks[other];
+    pl->open.tracks[other] = track;
+  }
+  // Otherwise one of the two is past the copy, and the reload that follows
+  // every edit of a cut playlist (UI_EDIT_RELOAD) shows them.
+  // The menu stays on the moved entry, and the list under it follows (as
+  // far as the copy goes).
   ui->options_target.index = other;
-  browse_menu(&ui->browse)->cursor = other;
+  browse_menu(&ui->browse)->cursor = other < count ? other : count - 1;
   ui->list_dirty = true;
   ui->list_restart = true;
 }
@@ -420,7 +449,7 @@ static void move_entry(ui_t *ui, int step, int64_t now_us) {
 static void remove_entry(ui_t *ui, int64_t now_us) {
   ui_pl_t *pl = ui->pl;
   uint32_t entry = ui->options_target.index;
-  if (!pl->open_loaded || entry >= pl->open.count) {
+  if (!pl->open_loaded || (entry >= pl->open.count && !pl->open.truncated)) {
     return;
   }
   ui_edit_t *slot = edit_slot(ui);
@@ -434,11 +463,14 @@ static void remove_entry(ui_t *ui, int64_t now_us) {
   }
   edit_note(ui, slot, request, PLAYLIST_REQUEST_REMOVE,
             UI_EDIT_ON_OPEN | (pl->open.truncated ? UI_EDIT_RELOAD : 0));
-  // One memmove of the entries after it: O(n), at most 2 KB.
-  memmove(&pl->open.tracks[entry], &pl->open.tracks[entry + 1],
-          (pl->open.count - entry - 1) * sizeof(uint16_t));
-  pl->open.count--;
-  update_view(pl);
+  // One memmove of the entries after it: O(n), at most 2 KB. (An entry past
+  // a cut playlist's copy is not in it: the reload shows the change.)
+  if (entry < pl->open.count) {
+    memmove(&pl->open.tracks[entry], &pl->open.tracks[entry + 1],
+            (pl->open.count - entry - 1) * sizeof(uint16_t));
+    pl->open.count--;
+    update_view(pl);
+  }
   // The cursor stays at the same position, or on the new last entry: the
   // count is put right by browse_refresh, which keeps the cursor if it can.
   ui_options_close(ui);
@@ -781,7 +813,12 @@ static void on_listing(ui_t *ui, const playlist_event_t *ev, int64_t now_us) {
   }
   pl->list_request = 0;
   if (ev->outcome != PLAYLIST_TASK_DONE) {
-    say_outcome(ui, ev, now_us);
+    // A listing ends DONE, CARD_ERROR or LIBRARY_BUSY.
+    listing_failed(ui,
+                   ev->outcome == PLAYLIST_TASK_LIBRARY_BUSY
+                       ? UI_OVERLAY_LIBRARY_BUSY
+                       : UI_OVERLAY_CARD_ERROR,
+                   now_us);
     return;
   }
   // What the cursors are on, by file name, before the catalog changes.
@@ -802,6 +839,7 @@ static void on_listing(ui_t *ui, const playlist_event_t *ev, int64_t now_us) {
     return;
   }
   pl->catalog_ready = true;
+  pl->list_failed = false;
   update_view(pl);
 
   // The open playlist, by its file name.
@@ -915,12 +953,15 @@ static void on_load(ui_t *ui, const playlist_event_t *ev, int64_t now_us) {
     pl->load_request = 0;
     pl->open_loaded = true;
     update_view(pl);
-    if (again && ui->layer == UI_LAYER_OPTIONS &&
+    if (again && pl->reload_failed && ui->layer == UI_LAYER_OPTIONS &&
         ui->options_target.kind == BROWSE_TARGET_ENTRY) {
-      // The entries were read again: the one the menu is about may be
-      // elsewhere now.
+      // Read again because an edit failed: the entry the menu is about may
+      // be elsewhere now. (A reload after this side's own edits that worked,
+      // as every edit of a playlist cut at 1,000 has, leaves the menu where
+      // it is, on the entry it moved.)
       ui_options_close(ui);
     }
+    pl->reload_failed = false;
     ui->list_dirty = true;
     return;
   }
@@ -998,6 +1039,7 @@ static void on_edit(ui_t *ui, const playlist_event_t *ev, int64_t now_us) {
   case PLAYLIST_REQUEST_MOVE_DOWN:
   case PLAYLIST_REQUEST_REMOVE:
     if (on_open) {
+      pl->reload_failed = true;
       reload(ui, now_us); // the copy has a change the file has not
     }
     break;

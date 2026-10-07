@@ -25,7 +25,10 @@
 //   an empty list       |Artists         |   the name alone
 //                       |(empty)         |
 //   a playlist screen   |Playlists       |   the name alone, until its
-//   waiting             |Loading         |   listing or entries come
+//   waiting             |Loading         |   listing or entries come; if
+//                                            the first listing failed,
+//                                            ">Card error", ">Library busy"
+//                                            or ">Busy", which 5 or 6 retries
 //   the options menu    |Kid A           |   the item's name, cut to fit
 //                       |>Add to queue   |   `>` and the action (over a
 //                                            list or Now Playing)
@@ -133,10 +136,20 @@ static bool overlay_on(const ui_t *ui, int64_t now_us) {
 #define CONFIRM_NAME_COL 7 // after "Delete "
 #define CONFIRM_NAME_WIDTH (SCREEN_COLS - CONFIRM_NAME_COL)
 
+static const char *overlay_text(ui_overlay_t overlay);
+
 static void render_list(const ui_t *ui, int64_t now_us, screen_t *screen) {
   menu_header(ui->list_name, &ui->list_menu, screen->cells[0]);
   if (ui->list_loading) {
-    screen_set_row(screen, 1, "Loading");
+    const ui_pl_t *pl = ui->pl;
+    if (pl->list_failed &&
+        ui->browse.levels[ui->browse.depth].screen == BROWSE_PLAYLISTS) {
+      // Why the first listing failed, as a row that 5 or 6 tries again.
+      screen_set_row(screen, 1, ">");
+      screen_put(screen, 1, ITEM_COL, overlay_text(pl->list_why));
+    } else {
+      screen_set_row(screen, 1, "Loading");
+    }
     return;
   }
   if (ui->list_menu.count == 0) {

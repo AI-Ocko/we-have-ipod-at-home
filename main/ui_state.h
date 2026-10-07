@@ -159,6 +159,10 @@ typedef struct {
   playlist_catalog_t catalog;
   bool catalog_ready;
   uint32_t list_request;
+  // No catalog yet and the listing failed or was refused: the Playlists
+  // screen shows why (list_why) instead of "Loading", and 5 or 6 asks again.
+  bool list_failed;
+  ui_overlay_t list_why;
   // A create or a rename: the name it gave, and whether it is done. The
   // first listing after it is done puts the Playlists screen's cursor on
   // that name (if the screen is on the stack), and then it is forgotten.
@@ -176,6 +180,7 @@ typedef struct {
   uint32_t open_serial;
   uint32_t load_request;
   bool open_loaded;
+  bool reload_failed; // a reload was asked for because an edit failed
   playlist_loaded_t open;
 
   // "Play" or "Shuffle play" on a playlist row: the load waited for, and
@@ -402,8 +407,12 @@ bool ui_pl_play_entries(ui_t *ui, const library_t *lib, uint32_t entry,
                         int64_t now_us);
 
 // Whether the list on show is a playlist screen still waiting for what it
-// lists ("Loading").
+// lists ("Loading", or why its first listing failed).
 bool ui_pl_loading(const ui_t *ui);
+
+// 5 or 6 on a Playlists screen whose first listing failed: ask again. True
+// if that is what the key did.
+bool ui_pl_retry_listing(ui_t *ui, int64_t now_us);
 
 // The options menu has just opened on options_target: a playlist row's
 // file name is kept (target_file), so a listing meanwhile changes nothing.

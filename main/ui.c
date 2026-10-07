@@ -441,7 +441,7 @@ static void ui_on_list_key(ui_t *ui, const key_event_t *event, int64_t now_us) {
     break;
   case '5':
   case '6':
-    if (press) {
+    if (press && !ui_pl_retry_listing(ui, now_us)) {
       ui_select(ui, event->key, now_us);
     }
     break;
