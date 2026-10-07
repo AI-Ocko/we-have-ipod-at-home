@@ -43,6 +43,14 @@
 // artist's songs, a playlist's entries) give every item '#': one group, so a
 // jump made there anyway finds no next group and goes at most to the top.
 //
+// THE SETTINGS ROWS
+//
+// The Backlight and Sleep timer rows show values the caller keeps
+// (browse_settings_t), read through the one pointer each time a row's text
+// is asked for; without it they show their names. The values are not text
+// in the index, so they are written straight into the caller's buffer
+// (settings_row) rather than through item_text.
+//
 // THE PLAYLIST SCREENS
 //
 // What they list is not in the index: the caller lists the folder, loads a
@@ -78,9 +86,25 @@ enum {
   MAIN_COUNT
 };
 
-static const char *const SETTINGS_ITEMS[] = {"Rescan library", "Keypad test",
-                                             "About"};
-enum { SETTINGS_RESCAN, SETTINGS_KEYTEST, SETTINGS_ABOUT, SETTINGS_COUNT };
+// The names of the Settings rows; with values attached, the Backlight and
+// Sleep timer rows show them instead (settings_row).
+static const char *const SETTINGS_ITEMS[] = {
+    "Rescan library", "Backlight", "Sleep timer", "Keypad test", "About"};
+enum {
+  SETTINGS_RESCAN,
+  SETTINGS_BACKLIGHT,
+  SETTINGS_SLEEP,
+  SETTINGS_KEYTEST,
+  SETTINGS_ABOUT,
+  SETTINGS_COUNT
+};
+
+static const char *const BACKLIGHT_ROWS[STANDBY_BACKLIGHT_COUNT] = {
+    "Backlight: 15 s", "Backlight: 30 s", "Backlight: 60 s", "Backlight: on"};
+
+// The most minutes the Sleep row shows, so that it stays within 15
+// characters ("Sleep: 999 min"); the timer itself is at most 60.
+#define SLEEP_ROW_MINUTES_MAX 999
 
 static const char ALL_SONGS[] = "All songs";
 static const char NEW_PLAYLIST[] = "New playlist";
@@ -281,6 +305,56 @@ void browse_set_playlists(browse_t *b, const browse_playlists_t *p) {
   }
 }
 
+void browse_set_settings(browse_t *b, const browse_settings_t *s) {
+  if (b != NULL) {
+    b->settings = s;
+  }
+}
+
+// The text of Settings row `index` when it shows a value: written to `out`
+// and true; false for a row that shows only its name. "Sleep: " and up to
+// three digits and " min" is at most 14 characters.
+static bool settings_row(const browse_settings_t *set, uint32_t index,
+                         char *out, size_t out_size) {
+  if (set == NULL) {
+    return false;
+  }
+  if (index == SETTINGS_BACKLIGHT) {
+    if ((unsigned)set->backlight >= STANDBY_BACKLIGHT_COUNT) {
+      return false;
+    }
+    copy_out(BACKLIGHT_ROWS[set->backlight], out, out_size);
+    return true;
+  }
+  if (index == SETTINGS_SLEEP) {
+    if (set->sleep_minutes == 0) {
+      copy_out("Sleep: off", out, out_size);
+      return true;
+    }
+    uint32_t minutes = set->sleep_minutes < SLEEP_ROW_MINUTES_MAX
+                           ? set->sleep_minutes
+                           : SLEEP_ROW_MINUTES_MAX;
+    char text[16] = "Sleep: ";
+    size_t len = 7;
+    char digits[3];
+    size_t n = 0;
+    do {
+      digits[n++] = (char)('0' + minutes % 10);
+      minutes /= 10;
+    } while (minutes != 0);
+    while (n > 0) {
+      text[len++] = digits[--n];
+    }
+    static const char MIN[] = " min";
+    for (size_t i = 0; i < sizeof(MIN); i++) { // the terminator too
+      text[len++] = MIN[i];
+    }
+    copy_out(text, out, out_size);
+    return true;
+  }
+  return false;
+}
+
 static bool is_playlist_level(const browse_level_t *level) {
   return level->screen == BROWSE_PLAYLISTS || level->screen == BROWSE_PLAYLIST;
 }
@@ -367,6 +441,10 @@ void browse_item(const browse_t *b, const library_t *lib, uint32_t index,
     return;
   }
   const browse_level_t *level = level_of(b);
+  if (level->screen == BROWSE_SETTINGS &&
+      settings_row(b->settings, index, out, out_size)) {
+    return;
+  }
   if (level->screen == BROWSE_PLAYLISTS && index != 0 &&
       catalog_of(b->playlists) != NULL) {
     playlist_catalog_name(catalog_of(b->playlists), index - 1, out, out_size);
@@ -460,6 +538,12 @@ static browse_result_t select_untargeted(browse_t *b, const library_t *lib,
     switch (cursor) {
     case SETTINGS_RESCAN:
       result.action = BROWSE_RESCAN;
+      break;
+    case SETTINGS_BACKLIGHT:
+      result.action = BROWSE_BACKLIGHT;
+      break;
+    case SETTINGS_SLEEP:
+      result.action = BROWSE_SLEEP;
       break;
     case SETTINGS_KEYTEST:
       result.action = BROWSE_KEYTEST;

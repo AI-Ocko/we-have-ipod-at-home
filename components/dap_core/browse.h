@@ -4,6 +4,7 @@
 #include "menu.h"
 #include "playlist.h"
 #include "playlist_catalog.h"
+#include "standby.h"
 #include "tracklist.h"
 #include <stdbool.h>
 #include <stddef.h>
@@ -12,9 +13,9 @@
 // The menu tree. It is a stack of levels, each a list with its own cursor,
 // so that going back returns to where the user was. It holds numbers, never
 // text or pointers into the index: every call that needs the index is given
-// it, and may be given NULL when there is none. The one pointer it keeps is
-// to what the playlist screens show (browse_playlists_t), which belongs to
-// the caller.
+// it, and may be given NULL when there is none. The two pointers it keeps
+// are to what the playlist screens show (browse_playlists_t) and to what the
+// Settings rows show (browse_settings_t); both belong to the caller.
 
 #define BROWSE_DEPTH_MAX 5
 
@@ -27,7 +28,8 @@ typedef enum {
   BROWSE_ALBUMS,       // every album, A to Z
   BROWSE_ALBUM,        // id = album: its tracks
   BROWSE_SONGS,        // every song, A to Z
-  BROWSE_SETTINGS,     // Rescan library, Keypad test, About
+  BROWSE_SETTINGS,     // Rescan library, Backlight, Sleep timer, Keypad
+                       // test, About
   BROWSE_PLAYLISTS,    // "New playlist", then every playlist A to Z
   BROWSE_PLAYLIST,     // id = the playlist's number in the catalog: its
                        // entries
@@ -49,10 +51,18 @@ typedef struct {
   uint32_t playlist; // which catalog entry `tracks` belongs to
 } browse_playlists_t;
 
+// What the Settings rows show. It belongs to the caller, who keeps it up to
+// date; browse only reads it.
+typedef struct {
+  standby_backlight_t backlight;
+  uint32_t sleep_minutes; // 0: off
+} browse_settings_t;
+
 typedef struct {
   browse_level_t levels[BROWSE_DEPTH_MAX];
   int depth;                           // index of the current level
   const browse_playlists_t *playlists; // NULL until browse_set_playlists
+  const browse_settings_t *settings;   // NULL until browse_set_settings
 } browse_t;
 
 typedef enum {
@@ -61,6 +71,8 @@ typedef enum {
   BROWSE_PLAY,        // play `list` starting at position `index`
   BROWSE_NOW_PLAYING, // show the Now Playing screen
   BROWSE_RESCAN,
+  BROWSE_BACKLIGHT, // move the backlight setting on
+  BROWSE_SLEEP,     // move the sleep timer on
   BROWSE_KEYTEST,
   BROWSE_ABOUT,
   BROWSE_NEW_PLAYLIST,  // "New playlist" was chosen
@@ -99,6 +111,14 @@ void browse_init(browse_t *b);
 // Attach what the playlist screens show (NULL: nothing). Only the pointer is
 // kept; call browse_refresh after it changes.
 void browse_set_playlists(browse_t *b, const browse_playlists_t *p);
+
+// Attach what the Settings rows show (NULL: the rows show their names
+// alone, "Backlight" and "Sleep timer"). Only the pointer is kept; it is
+// read each time a row's text is asked for, so nothing needs refreshing.
+// The Settings screen is: Rescan library, Backlight, Sleep timer, Keypad
+// test, About; its rows show values (spec section 9): "Backlight: 30 s"
+// ("15 s", "60 s", "on"), "Sleep: off", "Sleep: 27 min".
+void browse_set_settings(browse_t *b, const browse_settings_t *s);
 
 // Bring the current level's item count up to date with `lib`, and the
 // counts of any playlist levels on the stack with the attached playlists.

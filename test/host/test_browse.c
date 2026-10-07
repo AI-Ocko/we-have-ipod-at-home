@@ -165,8 +165,11 @@ static uint32_t jump_from(uint32_t row, int direction) {
 
 static const char *const MAIN_ITEMS[] = {
     "Now Playing", "Artists", "Albums", "Songs", "Playlists", "Settings"};
-static const char *const SETTINGS_ITEMS[] = {"Rescan library", "Keypad test",
-                                             "About"};
+// The Settings rows with no values attached.
+static const char *const SETTINGS_ITEMS[] = {
+    "Rescan library", "Backlight", "Sleep timer", "Keypad test", "About"};
+// The rows of Settings.
+enum { SET_RESCAN, SET_BACKLIGHT, SET_SLEEP, SET_KEYTEST, SET_ABOUT };
 static const char *const ARTIST_NAMES[] = {"Bjork",          "Deep Artist",
                                            "Queen",          "Radiohead",
                                            "Unknown Artist", "Various Artists"};
@@ -231,17 +234,19 @@ void test_main_menu_items_and_actions(void) {
 
   enter(SETTINGS);
   assert_at(BROWSE_SETTINGS, 0, 1);
-  TEST_ASSERT_EQUAL_UINT32(3, browse_menu(&b)->count);
+  TEST_ASSERT_EQUAL_UINT32(5, browse_menu(&b)->count);
   TEST_ASSERT_TRUE(browse_back(&b));
   assert_at(BROWSE_MAIN, 0, 0);
 }
 
 void test_settings_items_and_actions(void) {
   enter(SETTINGS);
-  assert_items(SETTINGS_ITEMS, 3);
-  act(0, BROWSE_RESCAN);
-  act(1, BROWSE_KEYTEST);
-  act(2, BROWSE_ABOUT);
+  assert_items(SETTINGS_ITEMS, 5);
+  act(SET_RESCAN, BROWSE_RESCAN);
+  act(SET_BACKLIGHT, BROWSE_BACKLIGHT);
+  act(SET_SLEEP, BROWSE_SLEEP);
+  act(SET_KEYTEST, BROWSE_KEYTEST);
+  act(SET_ABOUT, BROWSE_ABOUT);
 }
 
 void test_artists_are_listed_a_to_z(void) {
@@ -505,7 +510,7 @@ void test_groups_follow_the_items(void) {
 void test_levels_that_are_not_alphabetical_have_one_group(void) {
   TEST_ASSERT_EQUAL_STRING("######", groups()); // Main
   enter(SETTINGS);
-  TEST_ASSERT_EQUAL_STRING("###", groups());
+  TEST_ASSERT_EQUAL_STRING("#####", groups());
   browse_library_changed(&b);
   enter(ARTISTS);
   enter(RADIOHEAD);
@@ -558,11 +563,13 @@ void test_null_library_leaves_main_and_settings_working(void) {
 
   enter(SETTINGS);
   browse_refresh(&b, NULL);
-  assert_items(SETTINGS_ITEMS, 3);
+  assert_items(SETTINGS_ITEMS, 5);
   TEST_ASSERT_EQUAL_STRING("Settings", name());
-  act(0, BROWSE_RESCAN);
-  act(1, BROWSE_KEYTEST);
-  act(2, BROWSE_ABOUT);
+  act(SET_RESCAN, BROWSE_RESCAN);
+  act(SET_BACKLIGHT, BROWSE_BACKLIGHT);
+  act(SET_SLEEP, BROWSE_SLEEP);
+  act(SET_KEYTEST, BROWSE_KEYTEST);
+  act(SET_ABOUT, BROWSE_ABOUT);
   TEST_ASSERT_TRUE(browse_back(&b));
 
   // The library lists can be opened, and are empty.
@@ -920,7 +927,7 @@ void test_no_target_for_all_songs_main_and_settings(void) {
     assert_no_target(row);
   }
   enter(SETTINGS);
-  for (uint32_t row = 0; row < 3; row++) {
+  for (uint32_t row = 0; row < 5; row++) {
     assert_no_target(row);
   }
   browse_library_changed(&b);
@@ -1571,6 +1578,110 @@ void test_catalog_shrinking_empties_the_open_playlist(void) {
   TEST_ASSERT_EQUAL_STRING("", name());
 }
 
+// --- The Settings rows -------------------------------------------------------
+
+void test_settings_rows_show_values(void) {
+  browse_settings_t set = {.backlight = STANDBY_BACKLIGHT_30S,
+                           .sleep_minutes = 0};
+  browse_set_settings(&b, &set);
+  enter(SETTINGS);
+  static const char *const ROWS[] = {"Rescan library", "Backlight: 30 s",
+                                     "Sleep: off", "Keypad test", "About"};
+  assert_items(ROWS, 5);
+
+  // The caller changes its copy; the rows follow without a refresh.
+  static const struct {
+    standby_backlight_t value;
+    const char *row;
+  } BACKLIGHT[] = {{STANDBY_BACKLIGHT_15S, "Backlight: 15 s"},
+                   {STANDBY_BACKLIGHT_30S, "Backlight: 30 s"},
+                   {STANDBY_BACKLIGHT_60S, "Backlight: 60 s"},
+                   {STANDBY_BACKLIGHT_ON, "Backlight: on"}};
+  for (size_t i = 0; i < sizeof(BACKLIGHT) / sizeof(BACKLIGHT[0]); i++) {
+    set.backlight = BACKLIGHT[i].value;
+    TEST_ASSERT_EQUAL_STRING(BACKLIGHT[i].row, item(SET_BACKLIGHT));
+  }
+  static const struct {
+    uint32_t minutes;
+    const char *row;
+  } SLEEP[] = {{0, "Sleep: off"},
+               {1, "Sleep: 1 min"},
+               {9, "Sleep: 9 min"},
+               {10, "Sleep: 10 min"},
+               {27, "Sleep: 27 min"},
+               {60, "Sleep: 60 min"},
+               {999, "Sleep: 999 min"},
+               {1000, "Sleep: 999 min"},
+               {UINT32_MAX, "Sleep: 999 min"}};
+  for (size_t i = 0; i < sizeof(SLEEP) / sizeof(SLEEP[0]); i++) {
+    set.sleep_minutes = SLEEP[i].minutes;
+    TEST_ASSERT_EQUAL_STRING(SLEEP[i].row, item(SET_SLEEP));
+    TEST_ASSERT_LESS_OR_EQUAL_size_t(15, strlen(item(SET_SLEEP)));
+  }
+  // A value that is not one of the settings: the name alone.
+  set.backlight = STANDBY_BACKLIGHT_COUNT;
+  TEST_ASSERT_EQUAL_STRING("Backlight", item(SET_BACKLIGHT));
+  set.backlight = STANDBY_BACKLIGHT_15S;
+
+  // Every row fits the screen.
+  for (uint32_t row = 0; row < 5; row++) {
+    TEST_ASSERT_LESS_OR_EQUAL_size_t(15, strlen(item(row)));
+  }
+  // A small buffer gets as much as fits, terminated.
+  char text[8];
+  browse_item(&b, lib, SET_BACKLIGHT, text, sizeof(text));
+  TEST_ASSERT_EQUAL_STRING("Backlig", text);
+  set.sleep_minutes = 27;
+  browse_item(&b, lib, SET_SLEEP, text, sizeof(text));
+  TEST_ASSERT_EQUAL_STRING("Sleep: ", text);
+  browse_item(&b, lib, SET_SLEEP, text, 1);
+  TEST_ASSERT_EQUAL_STRING("", text);
+  // No index needed.
+  TEST_ASSERT_EQUAL_STRING("Sleep: 27 min", item_in(NULL, SET_SLEEP));
+  // The other screens are not touched.
+  TEST_ASSERT_TRUE(browse_back(&b));
+  assert_items(MAIN_ITEMS, 6);
+}
+
+void test_settings_rows_without_values(void) {
+  enter(SETTINGS);
+  assert_items(SETTINGS_ITEMS, 5);
+  browse_settings_t set = {.backlight = STANDBY_BACKLIGHT_ON,
+                           .sleep_minutes = 5};
+  browse_set_settings(&b, &set);
+  TEST_ASSERT_EQUAL_STRING("Backlight: on", item(SET_BACKLIGHT));
+  browse_set_settings(&b, NULL);
+  assert_items(SETTINGS_ITEMS, 5);
+  TEST_ASSERT_EQUAL_STRING("#####", groups());
+  // browse_init starts without.
+  browse_set_settings(&b, &set);
+  browse_init(&b);
+  TEST_ASSERT_NULL(b.settings);
+}
+
+void test_select_backlight_and_sleep_rows(void) {
+  browse_settings_t set = {.backlight = STANDBY_BACKLIGHT_30S,
+                           .sleep_minutes = 0};
+  browse_set_settings(&b, &set);
+  enter(SETTINGS);
+  browse_result_t r = act(SET_BACKLIGHT, BROWSE_BACKLIGHT);
+  TEST_ASSERT_EQUAL_UINT32(0, r.index);
+  r = act(SET_SLEEP, BROWSE_SLEEP);
+  TEST_ASSERT_EQUAL_UINT32(0, r.index);
+  // Selecting does not change the values: the caller does that.
+  TEST_ASSERT_EQUAL_INT(STANDBY_BACKLIGHT_30S, set.backlight);
+  TEST_ASSERT_EQUAL_UINT32(0, set.sleep_minutes);
+  // No target for the options menu.
+  browse_menu(&b)->cursor = SET_BACKLIGHT;
+  TEST_ASSERT_EQUAL_INT(BROWSE_TARGET_NONE, browse_target(&b, lib).kind);
+  browse_menu(&b)->cursor = SET_SLEEP;
+  TEST_ASSERT_EQUAL_INT(BROWSE_TARGET_NONE, browse_target(&b, lib).kind);
+  // The same without values attached, and without an index.
+  browse_set_settings(&b, NULL);
+  act_in(NULL, SET_BACKLIGHT, BROWSE_BACKLIGHT);
+  act_in(NULL, SET_SLEEP, BROWSE_SLEEP);
+}
+
 int main(void) {
   UNITY_BEGIN();
   RUN_TEST(test_starts_at_the_main_menu);
@@ -1614,5 +1725,8 @@ int main(void) {
   RUN_TEST(test_target_of_playlist_and_entry_rows);
   RUN_TEST(test_no_target_for_new_playlist);
   RUN_TEST(test_catalog_shrinking_empties_the_open_playlist);
+  RUN_TEST(test_settings_rows_show_values);
+  RUN_TEST(test_settings_rows_without_values);
+  RUN_TEST(test_select_backlight_and_sleep_rows);
   return UNITY_END();
 }

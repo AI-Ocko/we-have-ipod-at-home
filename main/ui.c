@@ -391,6 +391,9 @@ static void ui_select(ui_t *ui, char key, int64_t now_us) {
       ESP_LOGW(TAG, "Rescan refused");
     }
     break;
+  case BROWSE_BACKLIGHT:
+  case BROWSE_SLEEP:
+    break; // nothing yet: Task 2 of stage 8 wires these to standby
   case BROWSE_KEYTEST:
     ui->mode = UI_MODE_KEYTEST;
     ui->keytest_any = false;

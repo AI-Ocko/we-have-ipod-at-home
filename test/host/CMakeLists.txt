@@ -47,6 +47,8 @@ add_library(dap_core STATIC
   ${CORE_DIR}/textentry.c
   ${CORE_DIR}/playlist.c
   ${CORE_DIR}/playlist_catalog.c
+  ${CORE_DIR}/standby.c
+  ${CORE_DIR}/scrub.c
 )
 target_include_directories(dap_core PUBLIC ${CORE_DIR})
 
@@ -84,6 +86,8 @@ dap_test(test_play_queue)
 dap_test(test_options)
 dap_test(test_crc32)
 dap_test(test_textentry)
+dap_test(test_standby)
+dap_test(test_scrub)
 # The playlist files made by tools/make_test_playlists.py. Its tests check
 # that every fread and fwrite the module makes moves a whole block, and count
 # the index lookups each line costs.
