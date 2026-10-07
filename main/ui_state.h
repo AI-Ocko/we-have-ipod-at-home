@@ -10,6 +10,7 @@
 #include "player.h"
 #include "playlist_task.h"
 #include "screen.h"
+#include "scrub.h"
 #include "standby.h"
 #include "state_task.h"
 #include "textentry.h"
@@ -120,6 +121,7 @@ typedef struct {
   uint32_t play_id; // the `play` that is this track's: its events count
   uint32_t min_id;  // events with a lower number are old news
   bool active;      // that play has not ended, failed or been stopped
+  bool started;     // its STARTED has come: the player's position is its
 
   // The track before, while its last events may still arrive: for the log.
   char prev_path[UI_PATH_MAX];
@@ -129,6 +131,13 @@ typedef struct {
   // queue says what follows. False for a track the console started.
   bool from_queue;
   uint32_t saved_ms; // `elapsed_ms` as it was last handed over to be saved
+
+  // A seek made by fast-forward or rewind and not yet heard from: the
+  // target, and how many POSITION events have been passed over while
+  // waiting for one from there (ui_play.c, FAST-FORWARD AND REWIND).
+  bool seek_pending;
+  uint32_t seek_target_ms;
+  uint32_t seek_skipped;
 
   uint32_t failures;       // tracks in a row that would not play
   ui_notice_t notice;
@@ -281,6 +290,11 @@ typedef struct {
   // Now Playing: 4 or 6 has been pressed there and not held long enough to
   // be a long press: its release skips. '\0' when neither is.
   char skip_key;
+  // Now Playing: 4 or 6 held for fast-forward or rewind (ui_play.c), and
+  // where its target was when the long press came: a release that finds it
+  // there seeks nowhere.
+  scrub_t scrub;
+  uint32_t scrub_from_ms;
 
   // The key test screen.
   bool keytest_any; // an event has been shown
@@ -400,6 +414,17 @@ void ui_play_toggle(ui_t *ui, int64_t now_us);
 // the current one from its beginning. Each takes the index once.
 void ui_play_next(ui_t *ui, int64_t now_us);
 void ui_play_previous(ui_t *ui, int64_t now_us);
+
+// Holding 6 or 4 on Now Playing (ui.c, KEYS; ui_play.c, FAST-FORWARD AND
+// REWIND). The long press starts the scrub, if the track on Now Playing can
+// be seeked in (`direction` +1 forward, -1 back); each repeat moves its
+// target; the release jumps there. A scrub that is not active ignores all
+// three.
+void ui_play_scrub_start(ui_t *ui, int direction, int64_t now_us);
+void ui_play_scrub_repeat(ui_t *ui, int64_t now_us);
+void ui_play_scrub_release(ui_t *ui);
+// The scrub is over without a seek (`why` is for the log).
+void ui_play_scrub_drop(ui_t *ui, const char *why);
 
 // 1 and 3 on Now Playing. Each puts its confirmation on the bottom row.
 void ui_play_toggle_shuffle(ui_t *ui, int64_t now_us);

@@ -158,8 +158,9 @@
 //   a layer see LAYERS
 //   Now Playing   5 does what D does; `*` goes to the menus; 1 turns
 //           shuffle on or off; 3 takes loop from off to all to one to off;
-//           6 is next and 4 previous, ON RELEASE (below); `#` opens the
-//           options menu for the current track and the queue
+//           6 is next and 4 previous, ON RELEASE (below); held, 6 is
+//           fast-forward and 4 rewind (below); `#` opens the options menu
+//           for the current track and the queue
 //   About   any key that is not a global one leaves it, to Settings
 //
 // Only presses act (and repeats, where it says so), with one exception. A
@@ -174,6 +175,14 @@
 // only if it is of the key skip_key names and Now Playing is still up. So
 // the 6 that chose a track in a list, and is let go on Now Playing, skips
 // nothing: its press was not made there.
+//
+// Holding them seeks (ui_play.c, FAST-FORWARD AND REWIND). The long press
+// starts a scrub only if skip_key still names that key, that is, if its
+// press was made on Now Playing and acted on (a press that woke the
+// backlight never gets here, and nor do its long press and repeats); its
+// repeats move the target, and its release, which skip_key no longer
+// names, jumps there. Any press drops a scrub, before standby_key, so the
+// next key can never find one left over.
 //
 // STANDBY: THE BACKLIGHT AND THE SLEEP TIMER
 //
@@ -824,13 +833,23 @@ static void ui_on_now_playing_key(ui_t *ui, const key_event_t *event,
                                   int64_t now_us) {
   char key = event->key;
   if (key == '4' || key == '6') {
+    int direction = key == '6' ? +1 : -1;
+    bool scrubbing = ui->scrub.active && ui->scrub.direction == direction;
     switch (event->type) {
     case KEY_PRESS:
       ui->skip_key = key;
       break;
     case KEY_LONG:
-    case KEY_REPEAT:
+      if (ui->skip_key == key) {
+        ui_play_scrub_start(ui, direction, now_us);
+      }
       ui->skip_key = '\0'; // held: not a skip
+      break;
+    case KEY_REPEAT:
+      ui->skip_key = '\0';
+      if (scrubbing) {
+        ui_play_scrub_repeat(ui, now_us);
+      }
       break;
     case KEY_RELEASE:
       if (ui->skip_key == key) {
@@ -840,6 +859,8 @@ static void ui_on_now_playing_key(ui_t *ui, const key_event_t *event,
         } else {
           ui_play_previous(ui, now_us);
         }
+      } else if (scrubbing) {
+        ui_play_scrub_release(ui);
       }
       break;
     }
@@ -875,6 +896,11 @@ static void ui_on_key(ui_t *ui, const key_event_t *event, int64_t now_us) {
     return;
   }
   log_key(ui, event);
+  if (event->type == KEY_PRESS) {
+    // The keypad sends the held key's release before another press, so a
+    // scrub still going is one whose release was lost (see KEYS).
+    ui_play_scrub_drop(ui, "a key press");
+  }
   // Before anything else (STANDBY). A press during the fade ends it.
   bool was_fading = ui_fading(ui);
   bool act = standby_key(&ui->standby, event->key, event->type, now_us / 1000);

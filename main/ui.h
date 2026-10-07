@@ -46,7 +46,7 @@ void ui_stop(void);
 // The LCD's user-defined characters, as the codes that go in a screen cell.
 // The play triangle is the key test screen's glyph, so that screen needs no
 // character of its own. Seven of the eight are used. (The shuffle mark is a
-// plain `S`.)
+// plain `S`, and fast-forward and rewind are a plain `>>` and `<<`.)
 #define UI_GLYPH_PLAY KEYTEST_GLYPH_CODE // 8
 #define UI_GLYPH_PAUSE 9
 #define UI_GLYPH_BAR_FULL 10  // a cell of the volume bar: two levels

@@ -44,6 +44,13 @@
 //                                            column 13 `S` while shuffle is
 //                                            on, in column 15 the loop mark
 //                                            while loop is all or one
+//   ... 6 or 4 held     |Hey Mama - Kanye|   `>>` or `<<` (plain ASCII: the
+//                       |>>2:40/5:05  S L|   eight user-defined characters
+//                                            are seven taken) in the symbol's
+//                                            and the space's two columns, and
+//                                            the target in place of the time;
+//                                            the time does not move, so the
+//                                            marks still fit
 //   ... a notice        |Hey Mama - Kanye|
 //                       |Can't play      |   or "File missing", for 1.5 s
 //   ... no track        |Nothing playing |
@@ -299,7 +306,9 @@ static void render_now_playing(const ui_t *ui, const player_status_t *player,
   // The symbol, a space, the time; then the marks. Minutes are not turned
   // into hours: 75 minutes is "75:00".
   char text[2 * SCREEN_COLS];
-  uint32_t elapsed = play->elapsed_ms / 1000;
+  bool scrubbing = ui->scrub.active;
+  uint32_t elapsed =
+      (scrubbing ? ui->scrub.target_ms : play->elapsed_ms) / 1000;
   uint32_t total = play->duration_ms / 1000;
   snprintf(text, sizeof(text), "  %" PRIu32 ":%02" PRIu32 "/%" PRIu32
            ":%02" PRIu32, elapsed / 60, elapsed % 60, total / 60, total % 60);
@@ -311,6 +320,12 @@ static void render_now_playing(const ui_t *ui, const player_status_t *player,
   // have said (play->active), not the player's state: that changes a moment
   // after a `play` or a `stop` with no event to redraw on. Its pause flag
   // is set as the pause is asked for, so that much of it can be used.
+  if (scrubbing) {
+    char mark = ui->scrub.direction > 0 ? '>' : '<';
+    screen->cells[1][0] = mark;
+    screen->cells[1][1] = mark;
+    return;
+  }
   bool playing = play->active && player->state != PLAYER_STATE_PAUSED;
   screen->cells[1][0] = playing ? UI_GLYPH_PLAY : UI_GLYPH_PAUSE;
 }

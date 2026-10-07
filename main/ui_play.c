@@ -137,6 +137,60 @@
 //   the settings   shuffle and loop, when 1 or 3 changes them (and Shuffle
 //                  play). The volume is ui.c's.
 //
+// FAST-FORWARD AND REWIND
+//
+// Holding 6 or 4 on Now Playing (ui.c, KEYS, routes the keys here). The long
+// press starts `scrub` (scrub.h) from the time Now Playing shows; each
+// repeat moves its target; Now Playing shows the target with `>>` or `<<`
+// while it is held; the release jumps there. Only a track with a known
+// length can be scrubbed: the player cannot seek in one without (it ignores
+// the seek), so a long press on such a track does nothing. Nor while a
+// notice is up, a scan runs or there is no card.
+//
+// The release, in two cases:
+//
+//   a track the player has (playing or paused)
+//                  one player_seek_rel, by the target minus where playback
+//                  is at that moment (the player's count; but the time it
+//                  was started from until its STARTED has come, and the
+//                  target of a seek not yet heard from, which is what the
+//                  player counts from then). The player keeps a paused
+//                  track paused and silent, and a resume (D) carries on from
+//                  the new place (player.c, "seek"). So playing or paused it
+//                  is the same call.
+//   a remembered track (stopped, or waiting since power-on)
+//                  nothing is loaded, so there is nothing to seek in: the
+//                  target becomes the time Now Playing shows, which is the
+//                  time D starts it from (player_play with a start).
+//
+// Either way the time shown becomes the target and the position is saved
+// (save_position: flash, never the queue file, whose contents have not
+// changed). A release that finds the target where the long press put it
+// (a long press with no repeat) seeks nowhere, and so does a fast-forward
+// whose target playback has meanwhile passed, or a rewind whose target it
+// has not reached: neither key ever moves playback the other way.
+//
+// The scrub belongs to the track it began on. Whatever starts, stops, ends
+// or replaces that track (start, come_to_rest, ui_play_stop, the sleep
+// timer's stop included; an ERROR; a track the console starts; a new index)
+// drops it, and so does any key press (ui.c): the release then does nothing.
+// The track that follows a track ending is the queue's business, as usual.
+//
+// After a seek the next POSITION is the next whole 500 ms after the target,
+// but the output may post one more from the old place between the release
+// and the moment it is told to flush. Its play number is the same (a seek is
+// not a new play), so seek_pending passes over POSITION events that are not
+// within a second after the target; at most SEEK_SKIP_MAX of them, in case
+// the player made no seek at all (a FLAC whose head was not found).
+//
+// THE TIME NEVER PASSES THE LENGTH
+//
+// A seek lands approximately (spec section 4), so playback can run on past
+// the length the header gives before ENDED: 307 s of a 305 s track was seen.
+// The time taken from a POSITION or a STARTED event is held to the length
+// when the length is known, so neither Now Playing nor the saved position
+// ever shows more.
+//
 // AT POWER-ON
 //
 // The first index the UI sees is the moment the saved queue is restored, in
@@ -162,6 +216,11 @@ static const char *TAG = "dap";
 
 static const char ROOT[] = STORAGE_MOUNT_POINT "/";
 #define ROOT_LEN (sizeof(ROOT) - 1)
+
+// See FAST-FORWARD AND REWIND: the most POSITION events passed over while a
+// seek is awaited, and how far after the target the first one may be.
+#define SEEK_SKIP_MAX 2
+#define SEEK_WINDOW_MS 1000
 
 static const char *error_name(player_error_t error) {
   switch (error) {
@@ -218,6 +277,15 @@ static void keep_previous(ui_play_t *play) {
     strcpy(play->prev_path, play->path);
     play->prev_id = play->play_id;
   }
+}
+
+// The time shown and saved never passes the length (see THE TIME NEVER
+// PASSES THE LENGTH).
+static void set_elapsed(ui_play_t *play, uint32_t ms) {
+  if (play->duration_ms != 0 && ms > play->duration_ms) {
+    ms = play->duration_ms;
+  }
+  play->elapsed_ms = ms;
 }
 
 // Make `track` of the index the current track. Copies; starts nothing.
@@ -291,6 +359,7 @@ void ui_play_init(ui_t *ui, uint16_t *orders) {
 // Make the queue's current track the track on Now Playing. With the index
 // held, and the queue not empty. Copies; starts nothing.
 static void load_current(ui_t *ui, const library_t *lib, int64_t now_us) {
+  ui_play_scrub_drop(ui, "another track");
   load_track(&ui->play, lib, play_queue_current(&ui->queue), now_us);
   ui->play.from_queue = true;
 }
@@ -308,6 +377,9 @@ static void forget(ui_play_t *play) {
 static void start(ui_t *ui, uint32_t start_ms) {
   ui_play_t *play = &ui->play;
   uint32_t id;
+  ui_play_scrub_drop(ui, "a track started");
+  play->seek_pending = false;
+  play->started = false;
   play->notice_until_us = 0;
   play->elapsed_ms = start_ms;
   if (player_play(play->path, start_ms, &id) == ESP_OK) {
@@ -433,6 +505,7 @@ static void stop_player(ui_t *ui) {
 // run, with no failures against it.
 static void come_to_rest(ui_t *ui) {
   ui_play_t *play = &ui->play;
+  ui_play_scrub_drop(ui, "playback came to rest");
   play->active = false;
   play->notice_until_us = 0;
   play->elapsed_ms = 0;
@@ -576,6 +649,79 @@ void ui_play_toggle(ui_t *ui, int64_t now_us) {
   }
 }
 
+// --- fast-forward and rewind (see FAST-FORWARD AND REWIND) -------------------
+
+void ui_play_scrub_drop(ui_t *ui, const char *why) {
+  if (ui->scrub.active) {
+    ui->scrub.active = false;
+    ESP_LOGI(TAG, "SCRUB dropped (%s)", why);
+  }
+}
+
+void ui_play_scrub_start(ui_t *ui, int direction, int64_t now_us) {
+  const ui_play_t *play = &ui->play;
+  if (play->path[0] == '\0' || play->notice_until_us != 0 ||
+      play->duration_ms == 0 || ui->scanning || ui->no_card) {
+    return;
+  }
+  scrub_start(&ui->scrub, direction, play->elapsed_ms, play->duration_ms,
+              now_us / 1000);
+  ui->scrub_from_ms = ui->scrub.target_ms;
+  ESP_LOGI(TAG, "SCRUB %s from %" PRIu32 " ms", direction > 0 ? ">>" : "<<",
+           ui->scrub.target_ms);
+}
+
+void ui_play_scrub_repeat(ui_t *ui, int64_t now_us) {
+  scrub_repeat(&ui->scrub, now_us / 1000); // nothing if it is not active
+}
+
+void ui_play_scrub_release(ui_t *ui) {
+  ui_play_t *play = &ui->play;
+  if (!ui->scrub.active) {
+    return;
+  }
+  int direction = ui->scrub.direction;
+  uint32_t target = scrub_finish(&ui->scrub);
+  if (target == ui->scrub_from_ms) {
+    ESP_LOGI(TAG, "SCRUB released at %" PRIu32 " ms, where it began: no seek",
+             target);
+    return;
+  }
+  // Where playback is now, as the player will count from when it takes the
+  // seek: the time shown for a remembered track, and for one whose STARTED
+  // has not come (that is the time it was started from, and the player's
+  // count is still the track before's); the target of a seek not yet heard
+  // from; otherwise the player's own count.
+  uint32_t now_ms = play->elapsed_ms;
+  if (play->active && play->started && play->seek_pending) {
+    now_ms = play->seek_target_ms;
+  } else if (play->active && play->started) {
+    player_status_t status;
+    player_get_status(&status);
+    now_ms = status.position_ms;
+  }
+  int64_t delta = (int64_t)target - (int64_t)now_ms;
+  if ((direction > 0 && delta <= 0) || (direction < 0 && delta >= 0)) {
+    ESP_LOGI(TAG, "SCRUB released at %" PRIu32 " ms, playback at %" PRIu32
+             " ms: no seek", target, now_ms);
+    return;
+  }
+  if (play->active) {
+    // |delta| is below the length of a track, which is far below 2^31 ms.
+    if (player_seek_rel((int32_t)delta) != ESP_OK) {
+      ESP_LOGW(TAG, "SCRUB the player did not take the seek");
+      return;
+    }
+    play->seek_pending = true;
+    play->seek_target_ms = target;
+    play->seek_skipped = 0;
+  }
+  ESP_LOGI(TAG, "SCRUB to %" PRIu32 " ms (%s, by %+" PRId64 " ms)", target,
+           play->active ? "seek" : "the time D starts from", delta);
+  set_elapsed(play, target);
+  save_position(ui); // flash only: what the queue holds has not changed
+}
+
 // Find the track on Now Playing in `lib` again: its title and artist may
 // have changed, or it may have started while there was no index. One that
 // is not there any more and is not playing is forgotten.
@@ -607,6 +753,9 @@ static void find_again(ui_t *ui, const library_t *lib, int64_t now_us) {
 static void adopt(ui_t *ui, uint32_t play_id, int64_t now_us) {
   ui_play_t *play = &ui->play;
   char text[UI_TITLE_MAX];
+  ui_play_scrub_drop(ui, "the console started a track");
+  play->seek_pending = false;
+  play->started = false;
   keep_previous(play);
   // The player's newest path. Right unless the console has asked for yet
   // another track since; that one's events then correct it.
@@ -657,21 +806,35 @@ void ui_play_on_event(ui_t *ui, const player_event_t *event, int64_t now_us) {
              path, event->sample_rate, event->bits, event->channels,
              event->duration_ms);
     if (!old) {
-      // The time stays where the track was started from.
+      // The time stays where the track was started from (within the
+      // length).
       play->duration_ms = event->duration_ms;
+      set_elapsed(play, play->elapsed_ms);
+      play->started = true;
       play->failures = 0;
     }
     break;
   }
   case PLAYER_EVENT_POSITION:
     ESP_LOGI(PLAYER_TAG, "POSITION ms=%" PRIu32, event->position_ms);
+    if (!old && play->seek_pending &&
+        (event->position_ms < play->seek_target_ms ||
+         event->position_ms - play->seek_target_ms > SEEK_WINDOW_MS) &&
+        play->seek_skipped < SEEK_SKIP_MAX) {
+      // From before the seek (see FAST-FORWARD AND REWIND).
+      play->seek_skipped++;
+      ESP_LOGI(TAG, "SCRUB position %" PRIu32 " ms is from before the seek",
+               event->position_ms);
+      break;
+    }
     if (!old) {
-      play->elapsed_ms = event->position_ms;
+      play->seek_pending = false;
+      set_elapsed(play, event->position_ms);
       // Every UI_SAVE_EVERY_MS of the track, and when it has been moved
       // back: a comparison per event, no timer.
       if (play->from_queue &&
-          (event->position_ms >= play->saved_ms + UI_SAVE_EVERY_MS ||
-           event->position_ms < play->saved_ms)) {
+          (play->elapsed_ms >= play->saved_ms + UI_SAVE_EVERY_MS ||
+           play->elapsed_ms < play->saved_ms)) {
         save_position(ui);
       }
     }
@@ -693,6 +856,7 @@ void ui_play_on_event(ui_t *ui, const player_event_t *event, int64_t now_us) {
   case PLAYER_EVENT_ERROR:
     ESP_LOGE(PLAYER_TAG, "ERROR reason=%s", error_name(event->error));
     if (!old) {
+      ui_play_scrub_drop(ui, "the track failed");
       play->active = false;
       play->failures++;
       play->notice = event->error == PLAYER_ERROR_NOT_FOUND
@@ -731,6 +895,7 @@ void ui_play_on_time(ui_t *ui, int64_t now_us) {
 
 void ui_play_stop(ui_t *ui) {
   ui_play_t *play = &ui->play;
+  ui_play_scrub_drop(ui, "stopped");
   stop_player(ui);
   play->active = false;
   play->notice_until_us = 0; // and no next track after a notice either
@@ -820,6 +985,7 @@ static bool restore(ui_t *ui, const library_t *lib, int64_t now_us) {
 
 bool ui_play_library_changed(ui_t *ui, int64_t now_us) {
   ui_play_t *play = &ui->play;
+  ui_play_scrub_drop(ui, "a new index");
   const library_t *lib = ui_index_get(ui);
   if (lib == NULL) {
     return false;
