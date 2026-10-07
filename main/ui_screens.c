@@ -24,8 +24,18 @@
 //                                            a marquee in 15 columns
 //   an empty list       |Artists         |   the name alone
 //                       |(empty)         |
+//   a playlist screen   |Playlists       |   the name alone, until its
+//   waiting             |Loading         |   listing or entries come
 //   the options menu    |Kid A           |   the item's name, cut to fit
-//                       |>Add to queue   |   `>` and the action
+//                       |>Add to queue   |   `>` and the action (over a
+//                                            list or Now Playing)
+//   the picker          |Add to playlist |
+//                       |>New...         |   or `>` and a playlist's name,
+//                                            a marquee in 15 columns
+//   the confirmation    |Delete ROAD TRIP|   the name a marquee in 9
+//                       |>No             |   columns; or ">Yes"
+//   the text entry      |Name:           |
+//                       |ROAD TRIP_      |   textentry_row
 //   Now Playing         |Hey Mama - Kanye|   "Title - Artist", a marquee
 //                       |> 0:12/5:05  S L|   symbol, space, m:ss/m:ss; in
 //                                            column 13 `S` while shuffle is
@@ -40,7 +50,9 @@
 //                                            volume bar, or "Shuffle on",
 //                                            "Shuffle off", "Loop off",
 //                                            "Loop all", "Loop one", "Added",
-//                                            "Queue full"
+//                                            "Queue full", and the
+//                                            playlists' words (overlay_text),
+//                                            16 columns at most
 //   About               |1028 tracks     |
 //                       |Built 2026-10-02|
 //   scanning            |Scanning...     |
@@ -118,8 +130,15 @@ static bool overlay_on(const ui_t *ui, int64_t now_us) {
   return now_us < ui->overlay_until_us;
 }
 
+#define CONFIRM_NAME_COL 7 // after "Delete "
+#define CONFIRM_NAME_WIDTH (SCREEN_COLS - CONFIRM_NAME_COL)
+
 static void render_list(const ui_t *ui, int64_t now_us, screen_t *screen) {
   menu_header(ui->list_name, &ui->list_menu, screen->cells[0]);
+  if (ui->list_loading) {
+    screen_set_row(screen, 1, "Loading");
+    return;
+  }
   if (ui->list_menu.count == 0) {
     screen_set_row(screen, 1, "(empty)");
     return;
@@ -134,6 +153,54 @@ static void render_options(const ui_t *ui, screen_t *screen) {
   screen_set_row(screen, 1, ">");
   screen_put(screen, 1, ITEM_COL,
              options_text(ui->options[ui->options_menu.cursor]));
+}
+
+// The picker's row under its cursor, for drawing and for its marquee.
+static void picker_row(const ui_t *ui, char *out, size_t size) {
+  ui_pl_row_name(ui, ui->pl->picker_menu.cursor, out, size);
+}
+
+static void render_picker(const ui_t *ui, int64_t now_us, screen_t *screen) {
+  char name[PLAYLIST_FILE_MAX + 1];
+  picker_row(ui, name, sizeof(name));
+  screen_set_row(screen, 0, "Add to playlist");
+  screen_set_row(screen, 1, ">");
+  marquee_window(name, ITEM_WIDTH, ms_since(ui->pl->picker_since_us, now_us),
+                 &screen->cells[1][ITEM_COL]);
+}
+
+static void render_confirm(const ui_t *ui, int64_t now_us, screen_t *screen) {
+  const ui_pl_t *pl = ui->pl;
+  screen_set_row(screen, 0, "Delete");
+  marquee_window(pl->target_name, CONFIRM_NAME_WIDTH,
+                 ms_since(pl->confirm_since_us, now_us),
+                 &screen->cells[0][CONFIRM_NAME_COL]);
+  screen_set_row(screen, 1, pl->confirm_menu.cursor == 1 ? ">Yes" : ">No");
+}
+
+static void render_text(const ui_t *ui, screen_t *screen) {
+  screen_set_row(screen, 0, "Name:");
+  textentry_row(&ui->pl->text, screen->cells[1]);
+}
+
+// A layer over the menus or Now Playing (ui.c, LAYERS).
+static void render_layer(const ui_t *ui, int64_t now_us, screen_t *screen) {
+  switch (ui->layer) {
+  case UI_LAYER_OPTIONS:
+    render_options(ui, screen);
+    break;
+  case UI_LAYER_PICKER:
+    render_picker(ui, now_us, screen);
+    break;
+  case UI_LAYER_CONFIRM:
+    render_confirm(ui, now_us, screen);
+    break;
+  case UI_LAYER_TEXT:
+    render_text(ui, screen);
+    break;
+  case UI_LAYER_NONE:
+    break;
+  }
 }
 
 static void render_scanning(const ui_t *ui, screen_t *screen) {
@@ -236,6 +303,46 @@ static const char *overlay_text(ui_overlay_t overlay) {
     return "Added";
   case UI_OVERLAY_QUEUE_FULL:
     return "Queue full";
+  case UI_OVERLAY_SAVED:
+    return "Saved";
+  case UI_OVERLAY_SAVED_FIRST_1000:
+    return "Saved first 1000";
+  case UI_OVERLAY_RENAMED:
+    return "Renamed";
+  case UI_OVERLAY_DELETED:
+    return "Deleted";
+  case UI_OVERLAY_PLAYLIST_FULL:
+    return "Playlist full";
+  case UI_OVERLAY_NAME_IN_USE:
+    return "Name in use";
+  case UI_OVERLAY_CARD_ERROR:
+    return "Card error";
+  case UI_OVERLAY_LIBRARY_BUSY:
+    return "Library busy";
+  case UI_OVERLAY_TRY_AGAIN:
+    return "Try again";
+  case UI_OVERLAY_BUSY:
+    return "Busy";
+  case UI_OVERLAY_BAD_FILE:
+    return "Bad file";
+  case UI_OVERLAY_FILE_MISSING:
+    return "File missing";
+  case UI_OVERLAY_NOTHING_TO_PLAY:
+    return "Nothing to play";
+  case UI_OVERLAY_NOTHING_PLAYING:
+    return "Nothing playing";
+  case UI_OVERLAY_QUEUE_EMPTY:
+    return "Queue empty";
+  case UI_OVERLAY_NAME_EMPTY:
+    return "Name empty";
+  case UI_OVERLAY_NAME_TOO_LONG:
+    return "Name too long";
+  case UI_OVERLAY_BAD_CHARACTER:
+    return "Bad character";
+  case UI_OVERLAY_BAD_END:
+    return "Can't end in .";
+  case UI_OVERLAY_BAD_START:
+    return "Can't start w/ ."; // exactly the 16 columns
   case UI_OVERLAY_VOLUME:
     break;
   }
@@ -268,7 +375,11 @@ void ui_render(const ui_t *ui, const player_status_t *player, int64_t now_us,
     render_about(ui, screen);
     break;
   case UI_MODE_NOW_PLAYING:
-    render_now_playing(ui, player, now_us, screen);
+    if (ui->layer != UI_LAYER_NONE) {
+      render_layer(ui, now_us, screen);
+    } else {
+      render_now_playing(ui, player, now_us, screen);
+    }
     break;
   case UI_MODE_MENU:
     if (ui->no_card) {
@@ -276,8 +387,8 @@ void ui_render(const ui_t *ui, const player_status_t *player, int64_t now_us,
       screen_set_row(screen, 1, "");
     } else if (ui->scanning) {
       render_scanning(ui, screen);
-    } else if (ui->options_open) {
-      render_options(ui, screen);
+    } else if (ui->layer != UI_LAYER_NONE) {
+      render_layer(ui, now_us, screen);
     } else {
       render_list(ui, now_us, screen);
     }
@@ -304,17 +415,40 @@ uint32_t ui_next_change_ms(const ui_t *ui, int64_t now_us) {
     ms = ms_until(ui->play.notice_until_us, now_us);
     next = ms < next ? ms : next;
   }
-  if (ui->mode == UI_MODE_NOW_PLAYING) {
+  bool layer_seen = ui->layer != UI_LAYER_NONE &&
+                    (ui->mode == UI_MODE_NOW_PLAYING || ui_list_on_show(ui));
+  if (layer_seen) {
+    // The text entry's commit is due whether or not a message covers its
+    // row; the marquees are not worth waking for under the overlay.
+    if (ui->layer == UI_LAYER_TEXT) {
+      int64_t deadline_ms = textentry_deadline(&ui->pl->text);
+      if (deadline_ms != INT64_MAX) {
+        ms = ms_until(deadline_ms * 1000, now_us);
+        next = ms < next ? ms : next;
+      }
+    } else if (ui->layer == UI_LAYER_PICKER && !overlay) {
+      char name[PLAYLIST_FILE_MAX + 1];
+      picker_row(ui, name, sizeof(name));
+      ms = marquee_next_change_ms(name, ITEM_WIDTH,
+                                  ms_since(ui->pl->picker_since_us, now_us));
+      next = ms < next ? ms : next;
+    } else if (ui->layer == UI_LAYER_CONFIRM) {
+      ms = marquee_next_change_ms(ui->pl->target_name, CONFIRM_NAME_WIDTH,
+                                  ms_since(ui->pl->confirm_since_us, now_us));
+      next = ms < next ? ms : next;
+    }
+  } else if (ui->mode == UI_MODE_NOW_PLAYING) {
     if (ui->play.path[0] != '\0') {
       ms = marquee_next_change_ms(ui->play.title, SCREEN_COLS,
                                   ms_since(ui->play.title_since_us, now_us));
       next = ms < next ? ms : next;
     }
-  } else if (ui_list_on_show(ui) && !ui->options_open && !overlay &&
+  } else if (ui_list_seen(ui) && !overlay && !ui->list_loading &&
              ui->list_menu.count != 0) {
     // Under the overlay the item is not seen, so its steps are not worth
     // waking for; the overlay's end is, and the marquee is then drawn where
-    // it has got to. The options menu's rows do not move.
+    // it has got to. The options menu's rows do not move, and nor does
+    // "Loading".
     ms = marquee_next_change_ms(ui->list_item, ITEM_WIDTH,
                                 ms_since(ui->item_since_us, now_us));
     next = ms < next ? ms : next;

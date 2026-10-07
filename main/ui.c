@@ -14,6 +14,7 @@
 #include "pins.h"
 #include "player.h"
 #include "player_status.h"
+#include "playlist_task.h"
 #include "screen.h"
 #include "state_task.h"
 #include "ui_state.h"
@@ -26,14 +27,15 @@
 //
 // ONE TASK, ONE LOOP
 //
-// The UI task owns the LCD and is the only reader of four queues: key events
-// (the keypad and the console), player events, card events (start-up) and
-// the library's status. They are joined in a queue set, so the task sleeps
+// The UI task owns the LCD and is the only reader of five queues: key events
+// (the keypad and the console), player events, card events (start-up), the
+// library's status and the playlist task's answers. They are joined in a queue set, so the task sleeps
 // on all of them at once. One pass of its loop is:
 //
 //   1. read the clock, once: it decides what is drawn and how long to sleep
 //   2. act on a time that has come: a "Can't play" notice that has had its
-//      1.5 s gives way to the next track (ui_play_on_time)
+//      1.5 s gives way to the next track (ui_play_on_time); a character
+//      typed a second ago is committed (ui_text_on_time)
 //   3. if the list on show has moved, copy its texts out of the index
 //      (ui_fill_list: the one place a redraw takes the index, at most once)
 //   4. draw the state into a screen_t (ui_render, in ui_screens.c) and send
@@ -50,10 +52,12 @@
 // something to draw or to do. The loop allocates nothing; all its state is
 // one static ui_t.
 //
-// The work is in four files. This one has the loop, the keys and the
+// The work is in six files. This one has the loop, the keys and the
 // menus. ui_options.c has the options menu. ui_play.c has the track that is
 // playing and the queue it belongs to: what the player's events do, and
-// what is saved for the next power-on. ui_screens.c draws. State changes and
+// what is saved for the next power-on. ui_playlists.c has the playlist
+// screens, the picker, the delete confirmation and the playlist task's
+// answers; ui_text.c the text entry. ui_screens.c draws. State changes and
 // drawing are kept apart: an event handler only changes ui_t, and ui_render
 // is a function of ui_t, the player's status and the time. "Draw only what
 // changed" then needs no thought: whatever the handlers did, one screen is
@@ -65,11 +69,10 @@
 //
 //   MENU         the menu tree: a list (the main menu, Artists, an artist's
 //                albums, Albums, an album's or an artist's tracks, Songs,
-//                Settings). Its state is `browse` (numbers only) and the
-//                copy of the current list's texts (list_*).
-//                The options menu (`#`) opens over a list and is not a mode
-//                either: options_open, and the list is where it was when
-//                the menu closes.
+//                Playlists, a playlist's entries, Settings). Its state is
+//                `browse` (numbers only) and the copy of the current list's
+//                texts (list_*). A playlist screen still waiting for its
+//                listing or its entries says "Loading" (list_loading).
 //                While start-up waits for a card, "Insert SD card" covers
 //                the list; while the library is scanned, "Scanning..." and
 //                the count do. These are not modes: they come and go with
@@ -84,13 +87,36 @@
 //   KEYTEST      the key test screen: keytest_*.
 //   ABOUT        two facts: about_tracks and the firmware's build date.
 //
+// LAYERS
+//
+// Four things cover the menus or Now Playing without being a mode (`layer`;
+// at most one at a time): the options menu (`#`, ui_options.c), the picker
+// ("Add to playlist") and the delete confirmation (ui_playlists.c), and the
+// text entry (ui_text.c). The screen under a layer keeps its state, and is
+// shown again as it was when the layer goes. A layer takes the keys that
+// are not global (A, B, D, C):
+//
+//   options       2 / 8 move; 5 or 6 does the action; 4, `*` or `#` close
+//   picker        2 / 8 move; 5 or 6 chooses; 4, `*` or `#` close
+//   confirmation  2 / 8 move between No and Yes; 5 or 6 chooses; 4 or `*`
+//                 cancel; `#` does nothing
+//   text entry    presses of 0-9 type, `*` deletes, `#` saves (ui_text.c);
+//                 4 is a letter key here
+//
+// C over the text entry cancels it, back to the screen it was opened on, and
+// does nothing else. C over any other layer closes it and then does what C
+// does (Now Playing / the menus), so a layer never comes back by itself. A
+// scan beginning or a new index closes every layer: their numbers belong to
+// the old index (THE INDEX).
+//
 // OVERLAYS
 //
 // Two things take over a bottom row for 1.5 s, and neither is a screen. The
-// overlay replaces the bottom row of whatever is up (except the key test)
-// until overlay_until_us: the volume bar, or the words that confirm a key
-// ("Shuffle on", "Loop all", "Added", "Queue full"); the newest replaces
-// the one before. A notice ("Can't play", "File missing") replaces Now
+// overlay replaces the bottom row of whatever is up (except the key test),
+// layers included, until overlay_until_us: the volume bar, or the words that
+// confirm a key ("Shuffle on", "Loop all", "Added", "Queue full") or give a
+// playlist request's answer ("Saved", "Name in use", "Busy", ...); the
+// newest replaces the one before. A notice ("Can't play", "File missing") replaces Now
 // Playing's bottom row until play.notice_until_us, and when it goes the
 // next track is started; the overlay is drawn over it. Each is a time in
 // ui_t: ui_render compares it with the clock, and ui_next_change_ms makes
@@ -111,19 +137,19 @@
 //           is the one from before power-off), play that track from the
 //           time it shows; otherwise nothing
 //   C       Now Playing if the menus (or About) are up; the menus if Now
-//           Playing is, where the user left them
+//           Playing is, where the user left them (and see LAYERS)
 //
 //   a list  2 / 8 up / down on press and on repeat (a press goes round at
 //           the ends, a repeat stops there); 5 or 6 opens or selects; 4 or
 //           `*` goes back; 1 / 3 jump to the previous / next first letter
 //           where the list is A to Z, and move by 10 where it is not; `#`
-//           opens the options menu if the row is a track, an album or an
-//           artist
-//   the options menu   2 / 8 up / down; 5 or 6 does the action; 4, `*` or
-//           `#` closes it (ui_options.c)
+//           opens the options menu if the row is a track, an album, an
+//           artist, a playlist or an entry
+//   a layer see LAYERS
 //   Now Playing   5 does what D does; `*` goes to the menus; 1 turns
 //           shuffle on or off; 3 takes loop from off to all to one to off;
-//           6 is next and 4 previous, ON RELEASE (below); `#` does nothing
+//           6 is next and 4 previous, ON RELEASE (below); `#` opens the
+//           options menu for the current track and the queue
 //   About   any key that is not a global one leaves it, to Settings
 //
 // Only presses act (and repeats, where it says so), with one exception. A
@@ -148,7 +174,9 @@
 //     filled from the list, and the path, title and artist of the track to
 //     play), a letter jump (one take around the whole binary search),
 //     opening About (the track count), `#` (what is under the cursor and
-//     its name), an action of the options menu, next and previous.
+//     its name), an action of the options menu (which is also where the
+//     picker's tracks are gathered), next and previous. The picker, the
+//     confirmation and the text entry need no index.
 //     Moving the cursor and going back need no index at all: a list's
 //     length is already in its menu_t. Nor do pause, shuffle and loop.
 //   - a redraw takes it once, and only if the list on show has moved since
@@ -156,7 +184,8 @@
 //     the list's name and the item under the cursor.
 //   - a track that ends takes it once, for the track the queue says is
 //     next; a new index takes it once, to restore or check the queue and to
-//     find the current track in it again.
+//     find the current track in it again; a playlist's entries that arrive
+//     to be played take it once, to load the queue.
 //
 // What is kept between passes is copies and numbers: list_name, list_item,
 // list_menu, options_title, and play.path and play.title. A marquee step, a
@@ -168,8 +197,10 @@
 // with the library's latest status: not while a scan is running, and not
 // when a newer index has been published than the one `generation` names.
 // When the status with the new generation is read, the menus go to the main
-// menu (browse_library_changed), the options menu closes, and only then is
-// the new index used. The queue's numbers are tied to an index by its
+// menu (browse_library_changed), every layer closes, the open playlist and
+// any tracks held for a playlist are dropped (ui_pl_index_changed), and only
+// then is the new index used. A scan beginning does the same but for the
+// menus, which the scan screen covers until the new index comes. The queue's numbers are tied to an index by its
 // checksum instead, because a queue outlives a scan that finds the same
 // tracks (ui_play.c, A NEW INDEX).
 //
@@ -180,9 +211,10 @@
 //
 // The queue's two orders, 8,192 track numbers each, are one block of 32 KB
 // of PSRAM, allocated by ui_start and never freed. (Internal RAM has no
-// room for it: about 39 KB is free while a track plays.) If it cannot be
-// had the LCD says so and ui_start fails: the player does not run without
-// a queue.
+// room for it: about 38 KB is free while a track plays.) So is the
+// playlists' side (ui_pl_t, about 24 KB: ui_playlists.c, MEMORY); ui_t holds
+// a pointer to it. If either cannot be had the LCD says so and ui_start
+// fails: the player does not run without them.
 
 #define KEY_QUEUE_LENGTH 16
 #define PLAYER_EVENT_QUEUE_LENGTH 16
@@ -205,6 +237,7 @@ static QueueHandle_t s_key_events;
 static QueueHandle_t s_player_events;
 static QueueHandle_t s_card_events;
 static QueueHandle_t s_library_status;
+static QueueHandle_t s_playlist_events;
 static QueueSetHandle_t s_ui_events; // all of the above
 
 static TaskHandle_t s_task;
@@ -212,6 +245,7 @@ static atomic_uint s_passes;
 static atomic_uint s_lcd_updates;
 static atomic_bool s_stop_wanted; // ui_stop was called
 static uint16_t *s_queue_orders;  // the queue's two arrays: see MEMORY
+static ui_pl_t *s_pl;             // the playlists' side: see MEMORY
 
 // The console's `queue` (ui_queue_report). What it asked for, and the answer:
 // the UI task fills s_report inside s_report_lock and gives s_report_done.
@@ -264,6 +298,7 @@ static void ui_fill_list(ui_t *ui, int64_t now_us) {
     library_task_put(); // only copies and numbers from here
   }
   ui->list_menu = *menu;
+  ui->list_loading = ui_pl_loading(ui);
   // Different words on the row, or the same words at another place in the
   // list: they are read from the beginning.
   if (ui->list_restart || strcmp(item, ui->list_item) != 0) {
@@ -324,6 +359,11 @@ static void ui_select(ui_t *ui, char key, int64_t now_us) {
     if (!ui_play_load(ui, lib, result.list, result.index, false, now_us)) {
       result.action = BROWSE_NOTHING;
     }
+  } else if (result.action == BROWSE_PLAY_ENTRIES) {
+    // The open playlist's playable entries become the queue, from this one.
+    if (!ui_pl_play_entries(ui, lib, result.index, now_us)) {
+      result.action = BROWSE_NOTHING;
+    }
   } else if (result.action == BROWSE_ABOUT) {
     ui->about_tracks = library_track_count(lib);
   }
@@ -336,6 +376,7 @@ static void ui_select(ui_t *ui, char key, int64_t now_us) {
   case BROWSE_ENTERED: // ui_on_list_key sees that the level changed
     break;
   case BROWSE_PLAY:
+  case BROWSE_PLAY_ENTRIES:
     ui_play_start(ui);
     ui_show_now_playing(ui, now_us);
     break;
@@ -360,12 +401,13 @@ static void ui_select(ui_t *ui, char key, int64_t now_us) {
     ui->mode = UI_MODE_ABOUT;
     break;
   case BROWSE_NEW_PLAYLIST:
+    ui_text_open(ui, UI_TEXT_NEW, NULL, now_us);
+    break;
   case BROWSE_OPEN_PLAYLIST:
-  case BROWSE_PLAY_ENTRIES:
+    ui_pl_open_playlist(ui, result.index, now_us); // "Loading" until it comes
+    break;
   case BROWSE_MISSING:
-    // Stage 7 Task 5 wires the playlist screens. Until then no playlists
-    // are attached to the browse stack, so the main menu's Playlists row
-    // opens an empty list and none of these can happen.
+    ui_overlay_show(ui, UI_OVERLAY_FILE_MISSING, now_us);
     break;
   }
 }
@@ -415,6 +457,47 @@ static void ui_on_list_key(ui_t *ui, const key_event_t *event, int64_t now_us) {
   if (ui->browse.depth != depth || browse_menu(&ui->browse)->cursor != cursor) {
     ui->list_dirty = true;
     ui->list_restart = true;
+  }
+  ui_pl_after_list_key(ui, depth, now_us);
+}
+
+void ui_close_layer(ui_t *ui) {
+  switch (ui->layer) {
+  case UI_LAYER_TEXT:
+    ui_text_cancel(ui);
+    break;
+  case UI_LAYER_OPTIONS:
+    ui_options_close(ui);
+    break;
+  case UI_LAYER_PICKER:
+  case UI_LAYER_CONFIRM:
+    ui->layer = UI_LAYER_NONE;
+    ui->list_dirty = true;
+    ui->list_restart = true;
+    break;
+  case UI_LAYER_NONE:
+    break;
+  }
+}
+
+// A key while a layer is up. C has been dealt with (ui_on_key).
+static void ui_on_layer_key(ui_t *ui, const key_event_t *event,
+                            int64_t now_us) {
+  switch (ui->layer) {
+  case UI_LAYER_OPTIONS:
+    ui_options_on_key(ui, event, now_us);
+    break;
+  case UI_LAYER_PICKER:
+    ui_pl_picker_key(ui, event, now_us);
+    break;
+  case UI_LAYER_CONFIRM:
+    ui_pl_confirm_key(ui, event, now_us);
+    break;
+  case UI_LAYER_TEXT:
+    ui_text_on_key(ui, event, now_us);
+    break;
+  case UI_LAYER_NONE:
+    break;
   }
 }
 
@@ -502,7 +585,10 @@ static void ui_on_now_playing_key(ui_t *ui, const key_event_t *event,
   case '3':
     ui_play_cycle_loop(ui, now_us);
     break;
-  default: // `#` is stage 7's
+  case '#':
+    ui_options_open_now_playing(ui);
+    break;
+  default:
     break;
   }
 }
@@ -547,6 +633,11 @@ static void ui_on_key(ui_t *ui, const key_event_t *event, int64_t now_us) {
     return;
   case 'C':
     if (press) {
+      if (ui->layer == UI_LAYER_TEXT) {
+        ui_text_cancel(ui); // back to where it was opened (see LAYERS)
+        return;
+      }
+      ui_close_layer(ui);
       if (ui->mode == UI_MODE_NOW_PLAYING) {
         ui_show_menus(ui);
       } else {
@@ -563,14 +654,18 @@ static void ui_on_key(ui_t *ui, const key_event_t *event, int64_t now_us) {
     if (!ui_list_on_show(ui)) {
       break;
     }
-    if (ui->options_open) {
-      ui_options_on_key(ui, event, now_us);
+    if (ui->layer != UI_LAYER_NONE) {
+      ui_on_layer_key(ui, event, now_us);
     } else {
       ui_on_list_key(ui, event, now_us);
     }
     break;
   case UI_MODE_NOW_PLAYING:
-    ui_on_now_playing_key(ui, event, now_us);
+    if (ui->layer != UI_LAYER_NONE) {
+      ui_on_layer_key(ui, event, now_us);
+    } else {
+      ui_on_now_playing_key(ui, event, now_us);
+    }
     break;
   case UI_MODE_ABOUT:
     if (press) {
@@ -598,7 +693,9 @@ static void ui_on_library_status(ui_t *ui, const library_status_t *status,
     if (ui->mode != UI_MODE_KEYTEST) {
       ui->mode = UI_MODE_MENU;
     }
-    ui_options_close(ui); // its numbers are about to mean nothing
+    // The options menu's numbers are about to mean nothing, and so are the
+    // tracks a picker or a text entry holds.
+    ui_pl_index_changed(ui, now_us);
   }
   if (!status->scanning && status->generation != ui->generation) {
     // A new index (the first load, or a scan that has finished). The numbers
@@ -608,7 +705,7 @@ static void ui_on_library_status(ui_t *ui, const library_status_t *status,
     // on Now Playing.
     ui->generation = status->generation;
     browse_library_changed(&ui->browse);
-    ui_options_close(ui);
+    ui_pl_index_changed(ui, now_us); // layers close; the open playlist too
     ui->list_restart = true;
     if (ui_play_library_changed(ui, now_us) && ui->mode != UI_MODE_KEYTEST) {
       ui_show_now_playing(ui, now_us);
@@ -640,6 +737,11 @@ static void ui_take(ui_t *ui, QueueSetMemberHandle_t ready, int64_t now_us) {
     library_status_t status;
     if (xQueueReceive(s_library_status, &status, 0) == pdTRUE) {
       ui_on_library_status(ui, &status, now_us);
+    }
+  } else if (ready == s_playlist_events) {
+    playlist_event_t event;
+    if (xQueueReceive(s_playlist_events, &event, 0) == pdTRUE) {
+      ui_pl_on_event(ui, &event, now_us);
     }
   }
 }
@@ -698,6 +800,7 @@ static void ui_task(void *arg) {
   ui.list_dirty = true;
   state_task_loaded_settings(&ui.settings);
   ui_play_init(&ui, s_queue_orders);
+  ui_pl_init(&ui, s_pl);
   screen_t shown;        // what the LCD was last told to show
   bool shown_ok = false; // and it took it
 
@@ -705,6 +808,7 @@ static void ui_task(void *arg) {
     atomic_fetch_add(&s_passes, 1);
     int64_t now_us = esp_timer_get_time();
     ui_play_on_time(&ui, now_us);
+    ui_text_on_time(&ui, now_us);
     if (ui.list_dirty && ui_list_on_show(&ui)) {
       ui_fill_list(&ui, now_us);
     }
@@ -763,22 +867,32 @@ esp_err_t ui_start(ui_queues_t *queues) {
   s_card_events = xQueueCreate(CARD_EVENT_QUEUE_LENGTH, sizeof(card_event_t));
   s_library_status =
       xQueueCreate(LIBRARY_STATUS_QUEUE_LENGTH, sizeof(library_status_t));
+  s_playlist_events =
+      xQueueCreate(PLAYLIST_EVENT_QUEUE_LENGTH, sizeof(playlist_event_t));
+  // A set must be as long as all its members together.
   s_ui_events = xQueueCreateSet(KEY_QUEUE_LENGTH + PLAYER_EVENT_QUEUE_LENGTH +
                                 CARD_EVENT_QUEUE_LENGTH +
-                                LIBRARY_STATUS_QUEUE_LENGTH);
+                                LIBRARY_STATUS_QUEUE_LENGTH +
+                                PLAYLIST_EVENT_QUEUE_LENGTH);
   s_report_done = xSemaphoreCreateBinary();
   s_queue_orders =
       heap_caps_malloc(2 * UI_QUEUE_CAPACITY * sizeof(uint16_t),
                        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  s_pl = heap_caps_calloc(1, sizeof(ui_pl_t),
+                          MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
   bool have = s_key_events && s_player_events && s_card_events &&
-              s_library_status && s_ui_events && s_report_done &&
-              s_queue_orders;
+              s_library_status && s_playlist_events && s_ui_events &&
+              s_report_done && s_queue_orders && s_pl;
   if (have) {
+    ESP_LOGI(TAG, "UI memory: queue %u bytes, playlists %u bytes (PSRAM)",
+             (unsigned)(2 * UI_QUEUE_CAPACITY * sizeof(uint16_t)),
+             (unsigned)sizeof(ui_pl_t));
     // Queues must join the set while still empty, so before anything posts.
     xQueueAddToSet(s_key_events, s_ui_events);
     xQueueAddToSet(s_player_events, s_ui_events);
     xQueueAddToSet(s_card_events, s_ui_events);
     xQueueAddToSet(s_library_status, s_ui_events);
+    xQueueAddToSet(s_playlist_events, s_ui_events);
     have = xTaskCreatePinnedToCore(ui_task, "ui", UI_TASK_STACK, NULL,
                                    UI_TASK_PRIORITY, &s_task,
                                    UI_TASK_CORE) == pdPASS;
@@ -801,6 +915,7 @@ esp_err_t ui_start(ui_queues_t *queues) {
   queues->keys = s_key_events;
   queues->player_events = s_player_events;
   queues->library_status = s_library_status;
+  queues->playlist_events = s_playlist_events;
   return ESP_OK;
 }
 

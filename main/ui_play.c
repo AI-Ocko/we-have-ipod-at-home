@@ -360,6 +360,31 @@ bool ui_play_load(ui_t *ui, const library_t *lib, tracklist_t list,
   return true; // ui_play_start saves the position
 }
 
+bool ui_play_load_tracks(ui_t *ui, const library_t *lib, const uint16_t *tracks,
+                         uint32_t count, uint32_t start, bool shuffle,
+                         int64_t now_us) {
+  play_queue_t *q = &ui->queue;
+  if (start >= count || tracks[start] >= library_track_count(lib)) {
+    return false; // checked before, so not expected: nothing changes
+  }
+  if (shuffle && !q->shuffle) {
+    // As in ui_play_load: emptied first, so that turning shuffle on does not
+    // shuffle the queue that is about to be replaced.
+    play_queue_clear(q);
+    play_queue_set_shuffle(q, true);
+    ui->settings.shuffle = true;
+    state_task_save_settings(&ui->settings);
+  }
+  if (play_queue_load_tracks(q, tracks, count, start,
+                             library_track_count(lib)) == 0) {
+    return false; // not with `start` checked above
+  }
+  ui->queue_index = library_checksum(lib);
+  load_current(ui, lib, now_us);
+  queue_changed(ui);
+  return true; // ui_play_start saves the position
+}
+
 bool ui_play_add(ui_t *ui, const library_t *lib, const browse_target_t *target,
                  bool next, int64_t now_us) {
   play_queue_t *q = &ui->queue;

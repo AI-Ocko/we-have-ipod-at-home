@@ -2,38 +2,49 @@
 #include "options.h"
 #include "ui_state.h"
 #include <stdbool.h>
+#include <string.h>
 
-// The options menu: what `#` offers for the item under the cursor of a list.
-// Part of the UI task: called from its loop (ui.c).
+// The options menu: what `#` offers for the item under the cursor of a list,
+// or for Now Playing. Part of the UI task: called from its loop (ui.c).
 //
-// It opens over the list and is not a screen of its own (ui.c, THE SCREENS):
-// the list underneath keeps its place, and closing the menu shows it again.
-// While it is open the top row is the item's name, cut to fit, and the
-// bottom row one of its actions (options.h says which an item has):
+// It is a layer (ui.c, LAYERS), not a screen of its own: the list or Now
+// Playing underneath keeps its place, and closing the menu shows it again.
+// While it is open the top row is the item's name (on Now Playing, the
+// track's title), cut to fit, and the bottom row one of its actions
+// (options.h says which an item has):
 //
 //   |Kid A           |
 //   |>Add to queue   |
 //
-// `#` opens it only on a row that is a track, an album or an artist
-// (browse_target); on anything else the key does nothing. What it is about
-// is kept as numbers (options_target), which belong to the index that was
-// current when it opened: a scan, or a new index, closes the menu (ui.c).
+// `#` opens it on a row that is a track, an album, an artist, a playlist or
+// a playlist's entry (browse_target), and on Now Playing; on anything else
+// the key does nothing. What it is about is kept as numbers
+// (options_target), which belong to the index that was current when it
+// opened: a scan, or a new index, closes the menu (ui.c). A playlist row is
+// kept by its file name too (ui_pl_options_opened), so a listing that
+// arrives while the menu is open changes nothing it does.
 //
 // The actions:
 //
 //   Play          the queue becomes the track's list, starting at the track
 //                 (what selecting it does), or the album's or artist's
-//                 tracks from the first; it starts, and Now Playing comes up
-//   Shuffle play  the same for an album or an artist, with shuffle turned
-//                 on and a track picked at random to come first
+//                 tracks from the first; it starts, and Now Playing comes up.
+//                 On a playlist: its entries are loaded, then play from the
+//                 first playable one; on an entry, from that entry
+//   Shuffle play  the same for an album, an artist or a playlist, with
+//                 shuffle turned on and a track picked at random to come
+//                 first
 //   Play next     the track goes into the queue after the current one
 //   Add to queue  the track, or all the album's or artist's tracks, go to
 //                 the end of the queue: all of them or, if they do not fit,
 //                 none
+//   Add to playlist, Save queue, Rename, Delete, Move up, Move down, Remove
+//                 the playlists' (ui_playlists.c)
 //
-// The last two change nothing that is playing and leave the menu open:
-// "Added" or "Queue full" is shown on the bottom row for 1.5 s (the
-// overlay). Each action takes the index once.
+// Play next and Add to queue change nothing that is playing and leave the
+// menu open: "Added" or "Queue full" is shown on the bottom row for 1.5 s
+// (the overlay). So do Move up and Move down, with the menu on the moved
+// entry. Each action takes the index once.
 
 void ui_options_open(ui_t *ui) {
   const library_t *lib = ui_index_get(ui);
@@ -49,14 +60,25 @@ void ui_options_open(ui_t *ui) {
                 ui->options_title, sizeof(ui->options_title));
     ui->options_target = target;
     menu_reset(&ui->options_menu, count);
-    ui->options_open = true;
+    ui->layer = UI_LAYER_OPTIONS;
+    ui_pl_options_opened(ui);
   }
   library_task_put();
 }
 
+void ui_options_open_now_playing(ui_t *ui) {
+  ui->options_target = (browse_target_t){.kind = BROWSE_TARGET_NOW_PLAYING};
+  menu_reset(&ui->options_menu,
+             options_for(BROWSE_TARGET_NOW_PLAYING, ui->options));
+  strlcpy(ui->options_title,
+          ui->play.path[0] != '\0' ? ui->play.title : "Nothing playing",
+          sizeof(ui->options_title));
+  ui->layer = UI_LAYER_OPTIONS;
+}
+
 void ui_options_close(ui_t *ui) {
-  if (ui->options_open) {
-    ui->options_open = false;
+  if (ui->layer == UI_LAYER_OPTIONS) {
+    ui->layer = UI_LAYER_NONE;
     ui->list_restart = true; // the item under the cursor is read afresh
     ui->list_dirty = true;
   }
@@ -72,9 +94,15 @@ static void choose(ui_t *ui, int64_t now_us) {
     return;
   }
   bool play = false;
+  bool playlist_side = target->kind == BROWSE_TARGET_PLAYLIST ||
+                       target->kind == BROWSE_TARGET_ENTRY;
   switch (option) {
   case OPTION_PLAY:
   case OPTION_SHUFFLE_PLAY:
+    if (playlist_side) {
+      play = ui_pl_option(ui, lib, option, now_us);
+      break;
+    }
     play = ui_play_load(
         ui, lib, target->list,
         target->kind == BROWSE_TARGET_TRACK ? target->index : 0,
@@ -96,9 +124,7 @@ static void choose(ui_t *ui, int64_t now_us) {
   case OPTION_MOVE_DOWN:
   case OPTION_REMOVE:
   case OPTION_SAVE_QUEUE:
-    // The playlist actions do nothing yet: stage 7 Task 5 wires them. Until
-    // then "Add to playlist" is offered on tracks, albums and artists and
-    // choosing it leaves the menu open with nothing changed.
+    play = ui_pl_option(ui, lib, option, now_us);
     break;
   case OPTION_COUNT:
     break; // not an option

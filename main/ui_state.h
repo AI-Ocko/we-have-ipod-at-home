@@ -8,15 +8,18 @@
 #include "player_status.h"
 #include "library.h"
 #include "player.h"
+#include "playlist_task.h"
 #include "screen.h"
 #include "state_task.h"
+#include "textentry.h"
 #include "tracklist.h"
 #include <stdbool.h>
 #include <stdint.h>
 
-// The UI task's state, shared by ui.c, ui_options.c and ui_play.c (which
-// change it) and ui_screens.c (which draws it). Private to those four. The
-// design is described at the top of ui.c.
+// The UI task's state, shared by ui.c, ui_options.c, ui_play.c,
+// ui_playlists.c and ui_text.c (which change it) and ui_screens.c (which
+// draws it). Private to those six. The design is described at the top of
+// ui.c.
 
 // A name, a title or an artist from the index: at most 127 characters.
 #define UI_TEXT_MAX 128
@@ -41,6 +44,16 @@ typedef enum {
   UI_MODE_ABOUT,
 } ui_mode_t;
 
+// What covers the screen of the mode (the menus or Now Playing) without
+// being a screen of its own: see ui.c, LAYERS. At most one at a time.
+typedef enum {
+  UI_LAYER_NONE,
+  UI_LAYER_OPTIONS, // the options menu (ui_options.c)
+  UI_LAYER_PICKER,  // "Add to playlist": which playlist (ui_playlists.c)
+  UI_LAYER_CONFIRM, // "Delete" and the name: No or Yes (ui_playlists.c)
+  UI_LAYER_TEXT,    // typing a name (ui_text.c)
+} ui_layer_t;
+
 // What the bottom row of Now Playing says in place of the time.
 typedef enum {
   UI_NOTICE_CANT_PLAY,    // "Can't play": it would not decode
@@ -58,6 +71,27 @@ typedef enum {
   UI_OVERLAY_LOOP_ONE,
   UI_OVERLAY_ADDED,
   UI_OVERLAY_QUEUE_FULL,
+  // Stage 7: the playlists' results and refusals (ui_playlists.c, ui_text.c).
+  UI_OVERLAY_SAVED,
+  UI_OVERLAY_SAVED_FIRST_1000,
+  UI_OVERLAY_RENAMED,
+  UI_OVERLAY_DELETED,
+  UI_OVERLAY_PLAYLIST_FULL,
+  UI_OVERLAY_NAME_IN_USE,
+  UI_OVERLAY_CARD_ERROR,
+  UI_OVERLAY_LIBRARY_BUSY,
+  UI_OVERLAY_TRY_AGAIN, // the index has changed under the tracks
+  UI_OVERLAY_BUSY,      // a request could not be queued
+  UI_OVERLAY_BAD_FILE,  // a playlist with a line too long to read
+  UI_OVERLAY_FILE_MISSING,
+  UI_OVERLAY_NOTHING_TO_PLAY,
+  UI_OVERLAY_NOTHING_PLAYING,
+  UI_OVERLAY_QUEUE_EMPTY,
+  UI_OVERLAY_NAME_EMPTY,
+  UI_OVERLAY_NAME_TOO_LONG,
+  UI_OVERLAY_BAD_CHARACTER,
+  UI_OVERLAY_BAD_END,
+  UI_OVERLAY_BAD_START,
 } ui_overlay_t;
 
 // The track that is playing, or the last one that was. ui_play.c changes
@@ -88,8 +122,98 @@ typedef struct {
                            // and at this time the next track is started
 } ui_play_t;
 
+// --- the playlists' side of the UI (ui_playlists.c, ui_text.c) -------------
+//
+// All of it is one block of PSRAM, allocated once by ui_start (ui_t holds
+// the pointer): the catalog alone is 17 KB, and internal RAM has about 38 KB
+// free while a track plays. Sizes are in ui_playlists.c, MEMORY.
+
+// Edits sent and not yet answered, at most (ui_playlists.c, EDITS).
+#define UI_EDITS_MAX 32
+
+// What a text entry is for (ui_text.c).
+typedef enum {
+  UI_TEXT_NEW,         // "New playlist": an empty playlist
+  UI_TEXT_NEW_TRACKS,  // "New..." in the picker: a playlist of `tracks`
+  UI_TEXT_SAVE_QUEUE,  // "Save queue": a playlist of `tracks`, the queue's
+  UI_TEXT_RENAME,      // "Rename": the playlist `target_file`
+} ui_text_purpose_t;
+
+// An edit sent to the playlist task, until its event comes.
+typedef struct {
+  uint32_t request; // its number; 0: the slot is free
+  uint8_t kind;     // playlist_request_t
+  uint8_t flags;    // UI_EDIT_*
+  uint32_t serial;  // the open playlist's `open_serial` when it was sent
+} ui_edit_t;
+
+#define UI_EDIT_ON_OPEN 1u   // it changes the open playlist
+#define UI_EDIT_RELOAD 2u    // when done, load the open playlist again
+#define UI_EDIT_CUT 4u       // a Save queue that kept the first 1,000
+#define UI_EDIT_FOLLOW 8u    // a create or rename: the cursor follows it
+
+typedef struct {
+  // The playlists in the folder, as the newest listing had them. Only
+  // ready once a listing has arrived; until then the Playlists screen says
+  // "Loading". `list_request` is the listing waited for (0: none).
+  playlist_catalog_t catalog;
+  bool catalog_ready;
+  uint32_t list_request;
+  // A create or a rename: the name it gave, and whether it is done. The
+  // first listing after it is done puts the Playlists screen's cursor on
+  // that name (if the screen is on the stack), and then it is forgotten.
+  char follow[PLAYLIST_NAME_MAX + 1];
+  bool follow_done;
+
+  // What browse reads for the playlist screens (browse_set_playlists).
+  browse_playlists_t view;
+
+  // The open playlist: its file name ("" when none is open), its entries
+  // as the last load gave them and changed since by this side's own moves
+  // and removes, and the load waited for. `open_serial` counts the
+  // playlists opened, so that an answer about an earlier one is known.
+  char open_file[PLAYLIST_FILE_MAX + 1];
+  uint32_t open_serial;
+  uint32_t load_request;
+  bool open_loaded;
+  playlist_loaded_t open;
+
+  // "Play" or "Shuffle play" on a playlist row: the load waited for, and
+  // where it lands.
+  uint32_t play_request;
+  bool play_shuffle;
+  playlist_loaded_t play;
+
+  // Tracks to add, from the picker's target or the queue: numbers of the
+  // index whose checksum is `tracks_index`, made when the picker or the
+  // text entry for Save queue opened.
+  uint16_t tracks[PLAYLIST_ENTRIES_MAX];
+  uint32_t track_count;
+  uint32_t tracks_index;
+  bool tracks_cut; // the queue had more than PLAYLIST_ENTRIES_MAX
+
+  // The playlist the options menu, the delete confirmation or a rename are
+  // about, by file name, and its name for the confirmation's top row.
+  char target_file[PLAYLIST_FILE_MAX + 1];
+  char target_name[PLAYLIST_FILE_MAX + 1];
+
+  // The picker: row 0 "New...", row r the catalog's playlist r - 1.
+  menu_t picker_menu;
+  int64_t picker_since_us; // the marquee's zero
+  // The confirmation: row 0 "No", row 1 "Yes".
+  menu_t confirm_menu;
+  int64_t confirm_since_us;
+
+  // The text entry.
+  textentry_t text;
+  ui_text_purpose_t text_purpose;
+
+  ui_edit_t edits[UI_EDITS_MAX];
+} ui_pl_t;
+
 typedef struct {
   ui_mode_t mode;
+  ui_layer_t layer; // over the menus or Now Playing
 
   // What the rest of the system has said.
   bool no_card;        // start-up is still waiting for a card that mounts
@@ -107,10 +231,11 @@ typedef struct {
   char list_name[UI_TEXT_MAX];
   char list_item[UI_TEXT_MAX]; // the item under the cursor
   int64_t item_since_us;       // the marquee's zero
+  bool list_loading; // a playlist screen waiting for its listing or load
 
-  // The options menu, open over the list: the actions `#` offers for the
-  // item that was under the cursor. Its numbers belong to `generation`.
-  bool options_open;
+  // The options menu (layer UI_LAYER_OPTIONS), over the list or Now
+  // Playing: the actions `#` offers for the item that was under the cursor,
+  // or for Now Playing. Its numbers belong to `generation`.
   browse_target_t options_target;
   option_t options[OPTIONS_MAX];
   menu_t options_menu;              // how many actions, and the cursor
@@ -150,12 +275,19 @@ typedef struct {
   uint32_t repeat_count;
 
   uint32_t underruns; // how many have been reported so far
+
+  ui_pl_t *pl; // PSRAM: see above
 } ui_t;
 
 // Whether the menu tree is what the menu side shows: not while the card is
 // still awaited or a scan runs (those screens cover it).
 static inline bool ui_list_on_show(const ui_t *ui) {
   return ui->mode == UI_MODE_MENU && !ui->no_card && !ui->scanning;
+}
+
+// Whether the list is what is seen: on show and no layer over it.
+static inline bool ui_list_seen(const ui_t *ui) {
+  return ui_list_on_show(ui) && ui->layer == UI_LAYER_NONE;
 }
 
 // Put `what` on the bottom row for UI_OVERLAY_MS.
@@ -174,11 +306,17 @@ const library_t *ui_index_get(const ui_t *ui);
 // Put Now Playing up.
 void ui_show_now_playing(ui_t *ui, int64_t now_us);
 
+// Whatever layer is up goes, as its own "close" key would make it go (a
+// text entry is cancelled).
+void ui_close_layer(ui_t *ui);
+
 // --- ui_options.c: the options menu -------------------------------------------
 
 // `#` in a list: open the menu for the item under the cursor, if it is one
 // that has options. Takes the index once.
 void ui_options_open(ui_t *ui);
+// `#` on Now Playing: the menu for the current track and the queue.
+void ui_options_open_now_playing(ui_t *ui);
 void ui_options_close(ui_t *ui);
 
 // A key while the menu is open.
@@ -199,6 +337,15 @@ void ui_play_init(ui_t *ui, uint16_t *orders);
 bool ui_play_load(ui_t *ui, const library_t *lib, tracklist_t list,
                   uint32_t start, bool shuffle, int64_t now_us);
 void ui_play_start(ui_t *ui);
+
+// The same for a playlist's entries (`tracks`, numbers of `lib`, with
+// PLAYLIST_MISSING for a missing one): the queue becomes the playable ones,
+// current at entry `start`, which must be playable. With `shuffle`, turn
+// shuffle on first (`start` is then the caller's random pick). False if
+// nothing was taken. Follow with ui_play_start once the index is back.
+bool ui_play_load_tracks(ui_t *ui, const library_t *lib, const uint16_t *tracks,
+                         uint32_t count, uint32_t start, bool shuffle,
+                         int64_t now_us);
 
 // Put what `target` is (a track, or the tracks of an album or an artist) in
 // the queue: a track after the current one if `next`, everything else at the
@@ -237,6 +384,71 @@ void ui_play_stop(ui_t *ui);
 // in the index again. True if Now Playing should be put up: the restored
 // queue has a current track, which waits there, paused.
 bool ui_play_library_changed(ui_t *ui, int64_t now_us);
+
+// --- ui_playlists.c: the playlist screens, the picker, the confirmation ------
+
+// Point browse at what the playlist screens show. Once, at the start.
+void ui_pl_init(ui_t *ui, ui_pl_t *pl);
+
+// A list key has changed the menus (ui.c calls it after every one): a
+// playlist level that was left closes the open playlist, and one that was
+// entered asks for what it shows.
+void ui_pl_after_list_key(ui_t *ui, int depth_before, int64_t now_us);
+
+// What a select in a list asked for (browse.h). Called with the index held
+// (NULL: none), for the actions that need it.
+void ui_pl_open_playlist(ui_t *ui, uint32_t index, int64_t now_us);
+bool ui_pl_play_entries(ui_t *ui, const library_t *lib, uint32_t entry,
+                        int64_t now_us);
+
+// Whether the list on show is a playlist screen still waiting for what it
+// lists ("Loading").
+bool ui_pl_loading(const ui_t *ui);
+
+// The options menu has just opened on options_target: a playlist row's
+// file name is kept (target_file), so a listing meanwhile changes nothing.
+void ui_pl_options_opened(ui_t *ui);
+// The options menu's playlist actions, with the index held (not NULL).
+// True if a track was loaded to be played (the caller starts it).
+bool ui_pl_option(ui_t *ui, const library_t *lib, option_t option,
+                  int64_t now_us);
+
+// Keys for the picker and the confirmation.
+void ui_pl_picker_key(ui_t *ui, const key_event_t *event, int64_t now_us);
+void ui_pl_confirm_key(ui_t *ui, const key_event_t *event, int64_t now_us);
+
+// The text entry is done: the name is checked and passes. Send what it was
+// for. False (and "Busy" shown) if it could not be sent.
+bool ui_pl_send_name(ui_t *ui, const char *name, int64_t now_us);
+
+// What a refused name says on the bottom row.
+ui_overlay_t ui_name_overlay(playlist_name_t why);
+
+// A listing for a name check or a screen.
+void ui_pl_list(ui_t *ui, int64_t now_us);
+
+// An event of the playlist task.
+void ui_pl_on_event(ui_t *ui, const playlist_event_t *event, int64_t now_us);
+
+// The index is going (a scan began) or has been replaced: nothing that holds
+// its track numbers may go on (ui.c, THE INDEX).
+void ui_pl_index_changed(ui_t *ui, int64_t now_us);
+
+// The text of the picker's row `row`: "New..." or a playlist's name. For
+// drawing.
+void ui_pl_row_name(const ui_t *ui, uint32_t row, char *out, size_t size);
+
+// --- ui_text.c: the text entry ------------------------------------------------
+
+// Open it for `purpose`, starting with `initial` (NULL: nothing).
+void ui_text_open(ui_t *ui, ui_text_purpose_t purpose, const char *initial,
+                  int64_t now_us);
+// Close it, sending nothing.
+void ui_text_cancel(ui_t *ui);
+// A key while it is up (C included).
+void ui_text_on_key(ui_t *ui, const key_event_t *event, int64_t now_us);
+// Once per pass: a pending character whose second is up is committed.
+void ui_text_on_time(ui_t *ui, int64_t now_us);
 
 // --- ui_screens.c: drawing ---------------------------------------------------
 

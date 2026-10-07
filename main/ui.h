@@ -16,13 +16,15 @@ typedef struct {
   QueueHandle_t keys;           // key_event_t: the keypad and the console
   QueueHandle_t player_events;  // player_event_t: the player
   QueueHandle_t library_status; // library_status_t, length one: the library
+  QueueHandle_t playlist_events; // playlist_event_t: the playlist task
 } ui_queues_t;
 
 // Set up the LCD and its user-defined characters, create the queues, the
-// play queue's memory (32 KB of PSRAM) and the UI task. Call once, after
-// state_task_start (the UI starts from the saved settings) and before the
-// keypad, the player, the console and the library task are started: they
-// are given the queues. Running without an LCD is not an error.
+// play queue's memory (32 KB of PSRAM), the playlists' side's (about 24 KB
+// of PSRAM) and the UI task. Call once, after state_task_start (the UI
+// starts from the saved settings) and before the keypad, the player, the
+// console, the library task and the playlist task are started: they are
+// given the queues. Running without an LCD is not an error.
 // ESP_ERR_NO_MEM if any of the memory cannot be had: the LCD then says "Out
 // of memory", it is logged, and there is no user interface at all; the
 // caller should stop there.

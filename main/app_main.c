@@ -129,10 +129,9 @@ void app_main(void) {
   // whatever it is told to (library_task_start has said why in the log).
   library_task_start(s_queues.library_status);
 
-  // Playlists are optional in the same way. Nothing reads the UI's side of
-  // their events yet, so the UI's events are dropped (NULL): only the
-  // console's `pl` commands use the task for now.
-  playlist_task_start(NULL);
+  // Playlists are optional in the same way. The UI's requests are answered
+  // on its queue (created by ui_start, above).
+  playlist_task_start(s_queues.playlist_events);
 
   wait_for_card();
 
