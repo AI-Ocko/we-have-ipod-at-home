@@ -51,6 +51,25 @@ Not in this stage: battery monitoring (out of scope in the spec); writing playli
 4. **Memory over many tracks.** The largest free internal block must not shrink as tracks change (stage 7 saw 14 KB after an MP3 then a FLAC). Pinned in Task 5.
 5. **Timers across a scan, a card removal and Now Playing/menu switches.** The backlight and sleep timers keep counting; nothing they do blocks or waits on the card. Pinned in Task 2.
 
+## Amendments made during implementation
+
+Decided by the controller while the stage ran; the code follows these where they differ from the text below.
+
+- When the sleep timer finishes or its fade is cancelled, the setting goes back to off (the next press picks 15). Any key event, not only a press, counts as activity for the backlight.
+- A forward hold never moves the target back, and a rewind never forward. A fade ends only at its end or when cancelled; the UI cancels it on pause, stop or the queue running out, only while a fade is running. After a sleep stop, or a pause or stop during a fade, the volume returns 500 ms later so no burst escapes before the player has stopped.
+- Holding `4`/`6` does nothing on a track of unknown length (the player cannot seek there) or while the card is out.
+- With no library index and no scan running, playlist requests that carry no track numbers are served (list, read, remove, move, rename, delete, free space).
+- The codec's working blocks up to 16 KB come from a 56 KB pool in internal RAM set aside at start-up, so the decoder can never silently land in slow PSRAM; this costs idle and MP3 headroom only.
+- Task 7 was added: spec section 11's card-loss recovery and "Library full" had never been built. The player holds the card while it has a file open, so the card is never unmounted under it. "(full)" is kept in NVS keyed by the index checksum.
+
+Accepted limitations (none blocks the hardware check):
+
+- While the card is out, the menus are covered by `Insert SD card` (as at start-up), so Settings cannot be changed until it is back; `D`/`4`/`6` on Now Playing do nothing then, without a message.
+- A list key held through a whole sleep fade keeps scrolling in the dark. With Backlight `on`, a timer that expires while `Can't play` shows on the last track leaves the light on.
+- Spills from the codec pool and a codec update that bypassed the override would both be silent (the codec is pinned at 2.6.2; `stat` shows the pool's use).
+- The soak saw the LCD's I2C link time out and re-initialise 25-39 times an hour: wiring or pull-ups, not firmware.
+- Console-only edge cases in the card-loss window (a console `scan` or `play` racing the remount) are test aids, not user paths.
+
 ## File Structure
 
 | Path | Responsibility | Task |
