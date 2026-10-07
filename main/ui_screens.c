@@ -57,7 +57,10 @@
 //                                            playlists' words (overlay_text),
 //                                            16 columns at most
 //   About               |1028 tracks     |
-//                       |Built 2026-10-02|
+//                       |Free 912 MB  Bui|   a marquee: the free space and
+//                                            "Built Oct  7 2026"; "Free ..."
+//                                            until it is known, "Free ?" if
+//                                            it cannot be
 //   scanning            |Scanning...     |
 //                       |412 tracks      |
 //   waiting             |Insert SD card  |
@@ -224,31 +227,44 @@ static void render_scanning(const ui_t *ui, screen_t *screen) {
   screen_set_row(screen, 1, count);
 }
 
-// The firmware's build date as "2026-10-02". The compiler gives it as
-// "Oct  2 2026"; anything else is shown as it comes.
-static void build_date(char *out, size_t out_size) {
-  static const char MONTHS[] = "JanFebMarAprMayJunJulAugSepOctNovDec";
-  const char *date = esp_app_get_description()->date;
-  if (strlen(date) == 11) {
-    for (int month = 0; month < 12; month++) {
-      if (strncmp(date, MONTHS + 3 * month, 3) == 0) {
-        snprintf(out, out_size, "%.4s-%02d-%c%c", date + 7, month + 1,
-                 date[4] == ' ' ? '0' : date[4], date[5]);
-        return;
-      }
+// About's bottom row: the card's free space and the build date, as the
+// compiler gives it ("Oct  7 2026"). The free space is in MB (2^20 bytes)
+// below 10 GB, in GB (2^30 bytes) with one decimal from there, rounded down
+// so as never to promise room that is not there. "Free ..." while the
+// playlist task is asked, "Free ?" if it could not tell.
+#define ABOUT_ROW_MAX 64
+static void about_row(const ui_t *ui, char *out, size_t size) {
+  char space[24];
+  switch (ui->about_space) {
+  case UI_SPACE_WAITING:
+    strcpy(space, "...");
+    break;
+  case UI_SPACE_UNKNOWN:
+    strcpy(space, "?");
+    break;
+  case UI_SPACE_KNOWN: {
+    uint64_t bytes = ui->about_free_bytes;
+    if (bytes < (10ull << 30)) {
+      snprintf(space, sizeof(space), "%" PRIu64 " MB", bytes >> 20);
+    } else {
+      uint64_t tenths = bytes / ((1ull << 30) / 10);
+      snprintf(space, sizeof(space), "%" PRIu64 ".%u GB", tenths / 10,
+               (unsigned)(tenths % 10));
     }
+    break;
   }
-  snprintf(out, out_size, "%s", date);
+  }
+  snprintf(out, size, "Free %s  Built %s", space,
+           esp_app_get_description()->date);
 }
 
-static void render_about(const ui_t *ui, screen_t *screen) {
-  char text[2 * SCREEN_COLS];
+static void render_about(const ui_t *ui, int64_t now_us, screen_t *screen) {
+  char text[ABOUT_ROW_MAX];
   snprintf(text, sizeof(text), "%" PRIu32 " tracks", ui->about_tracks);
   screen_set_row(screen, 0, text);
-  char date[SCREEN_COLS];
-  build_date(date, sizeof(date));
-  snprintf(text, sizeof(text), "Built %s", date);
-  screen_set_row(screen, 1, text);
+  about_row(ui, text, sizeof(text));
+  marquee_window(text, SCREEN_COLS, ms_since(ui->about_since_us, now_us),
+                 screen->cells[1]);
 }
 
 // Shuffle and loop, each shown only while it is on.
@@ -387,7 +403,7 @@ void ui_render(const ui_t *ui, const player_status_t *player, int64_t now_us,
                    ui->keytest_count);
     return;
   case UI_MODE_ABOUT:
-    render_about(ui, screen);
+    render_about(ui, now_us, screen);
     break;
   case UI_MODE_NOW_PLAYING:
     if (ui->layer != UI_LAYER_NONE) {
@@ -456,6 +472,14 @@ uint32_t ui_next_change_ms(const ui_t *ui, int64_t now_us) {
     if (ui->play.path[0] != '\0') {
       ms = marquee_next_change_ms(ui->play.title, SCREEN_COLS,
                                   ms_since(ui->play.title_since_us, now_us));
+      next = ms < next ? ms : next;
+    }
+  } else if (ui->mode == UI_MODE_ABOUT) {
+    if (!overlay) {
+      char text[ABOUT_ROW_MAX];
+      about_row(ui, text, sizeof(text));
+      ms = marquee_next_change_ms(text, SCREEN_COLS,
+                                  ms_since(ui->about_since_us, now_us));
       next = ms < next ? ms : next;
     }
   } else if (ui_list_seen(ui) && !overlay && !ui->list_loading &&

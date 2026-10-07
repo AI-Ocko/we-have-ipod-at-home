@@ -248,7 +248,8 @@ static const char *cmd_stat(void) {
            "stat state=%s pos_ms=%u vol=%d fill=%u low=%d underruns=%u "
            "wall_ms=%u dec_busy_ms=%u out_busy_ms=%u dec_stack_free=%u "
            "out_stack_free=%u heap_int=%u heap_int_largest=%u "
-           "ui_stack_free=%u ui_passes=%u ui_lcd=%u",
+           "ui_stack_free=%u ui_passes=%u ui_lcd=%u ui_light=%s "
+           "ui_backlight=%u ui_sleep_s=%u ui_fading=%d",
            STATE[s.state], (unsigned)s.position_ms, s.volume,
            (unsigned)s.ring_fill, (int)s.ring_low, (unsigned)s.underruns,
            (unsigned)s.wall_ms, (unsigned)s.decoder_busy_ms,
@@ -257,7 +258,8 @@ static const char *cmd_stat(void) {
            (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
            (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
            (unsigned)ui.stack_free, (unsigned)ui.passes,
-           (unsigned)ui.lcd_updates);
+           (unsigned)ui.lcd_updates, ui.lit ? "on" : "off",
+           (unsigned)ui.backlight, (unsigned)ui.sleep_left_s, (int)ui.fading);
   return NULL;
 }
 
@@ -531,14 +533,15 @@ static const char *cmd_state(char *args) {
   if (!state_task_report(&r)) {
     return "no state task";
   }
-  char text[6][12];
+  char text[7][12];
   ESP_LOGI(TAG,
-           "state flash=%s volume=%s shuffle=%s loop=%s position=%s track=%s "
-           "elapsed_ms=%s stack_free=%u",
+           "state flash=%s volume=%s shuffle=%s loop=%s backlight=%s "
+           "position=%s track=%s elapsed_ms=%s stack_free=%u",
            r.flash ? "ok" : "unusable",
            saved(r.has_volume, r.volume, text[0], sizeof(text[0])),
            saved(r.has_shuffle, r.shuffle, text[1], sizeof(text[1])),
            saved(r.has_loop, r.loop, text[2], sizeof(text[2])),
+           saved(r.has_backlight, r.backlight, text[6], sizeof(text[6])),
            saved(r.has_position, r.position.position, text[3], sizeof(text[3])),
            saved(r.has_position, r.position.track, text[4], sizeof(text[4])),
            saved(r.has_position, r.position.elapsed_ms, text[5],
@@ -919,6 +922,22 @@ static const char *pl_del(char *args) {
   return pl_wait(playlist_task_delete(PLAYLIST_CLIENT_CONSOLE, s_pl->file));
 }
 
+// The card's size and free space, read by the playlist task as About's is.
+static const char *pl_free(void) {
+  uint32_t request = playlist_task_space(PLAYLIST_CLIENT_CONSOLE);
+  const char *why = pl_wait(request);
+  if (why != NULL) {
+    return why;
+  }
+  playlist_space_t space;
+  if (!playlist_task_copy_space(PLAYLIST_CLIENT_CONSOLE, request, &space)) {
+    return "the answer was replaced by a newer one";
+  }
+  ESP_LOGI(TAG, "pl free total=%" PRIu64 " free=%" PRIu64, space.total_bytes,
+           space.free_bytes);
+  return NULL;
+}
+
 static const char *cmd_pl(char *args) {
   if (s_pl == NULL) {
     return "no memory for the pl commands";
@@ -944,11 +963,13 @@ static const char *cmd_pl(char *args) {
     return pl_mv(args);
   } else if (strcmp(sub, "del") == 0) {
     return pl_del(args);
+  } else if (strcmp(sub, "free") == 0 && *skip_spaces(args) == '\0') {
+    return pl_free();
   }
   return "expected: pl ls | pl show <n> | pl cat <n> | pl new <name> "
          "[track ...] | pl add <n> <track> [track ...] | pl rm <n> <entry> | "
          "pl up <n> <entry> | pl down <n> <entry> | pl mv <n> <name> | "
-         "pl del <n>";
+         "pl del <n> | pl free";
 }
 
 // The screen shows the player's state but is redrawn only when the UI task

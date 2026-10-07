@@ -10,6 +10,7 @@
 #include "player.h"
 #include "playlist_task.h"
 #include "screen.h"
+#include "standby.h"
 #include "state_task.h"
 #include "textentry.h"
 #include "tracklist.h"
@@ -32,6 +33,11 @@
 #define UI_OVERLAY_MS 1500 // how long the volume bar or a notice stays
 #define UI_FAILURES_MAX 3  // unplayable tracks in a row before giving up
 #define UI_SAVE_EVERY_MS 30000 // how often a playing track's time is saved
+// How long after the sleep fade's stop (or a fade cancelled by a pause or a
+// stop) the player's volume goes back to the setting: the player stops a
+// moment after it is told to, and what it still plays meanwhile must not
+// come out at the full volume (ui.c, STANDBY).
+#define UI_VOLUME_BACK_MS 500
 
 // The most tracks the queue holds (the spec's 8,192), which is also the most
 // the state task saves.
@@ -53,6 +59,13 @@ typedef enum {
   UI_LAYER_CONFIRM, // "Delete" and the name: No or Yes (ui_playlists.c)
   UI_LAYER_TEXT,    // typing a name (ui_text.c)
 } ui_layer_t;
+
+// About's free space: asked for, read, or it could not be had.
+typedef enum {
+  UI_SPACE_WAITING, // "Free ..."
+  UI_SPACE_KNOWN,
+  UI_SPACE_UNKNOWN, // "Free ?"
+} ui_space_t;
 
 // What the bottom row of Now Playing says in place of the time.
 typedef enum {
@@ -275,8 +288,22 @@ typedef struct {
   unsigned keytest_count;
   char keytest_opened_by; // the key whose release is not to be shown
 
-  // About.
+  // About: the track count, and the card's free space, which the playlist
+  // task reads (the request waited for; 0 when none is).
   uint32_t about_tracks;
+  uint32_t about_space_request;
+  ui_space_t about_space;
+  uint64_t about_free_bytes; // when UI_SPACE_KNOWN
+  int64_t about_since_us;    // the bottom row's marquee's zero
+
+  // The backlight and the sleep timer (ui.c, STANDBY). `standby` decides;
+  // the rest carries its decisions out.
+  standby_t standby;
+  browse_settings_t settings_view; // what the Settings rows show
+  bool lcd_lit;          // what the LCD's backlight was last switched to
+  int fade_volume;       // the level the fade last gave the player; -1: none
+  bool volume_back;      // the player's volume is to go back to the setting
+  int64_t volume_back_ms; // at this time; INT64_MAX: when the pass ends
 
   ui_play_t play;
 

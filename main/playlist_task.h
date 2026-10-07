@@ -31,7 +31,8 @@
 //   console never takes an event meant for the UI, nor the UI one meant for
 //   the console.
 // - A listing and a load have results too big for an event (a catalog is
-//   about 17 KB, a load 2 KB). Each client has one result of each kind,
+//   about 17 KB, a load 2 KB); a read and the card's free space are copied
+//   out the same way. Each client has one result of each kind,
 //   kept by this module; the event says it is ready and the client copies
 //   it out with playlist_task_copy_catalog / playlist_task_copy_load, under
 //   a lock held only for that copy. A newer result of the same kind for the
@@ -93,6 +94,7 @@ typedef enum {
   PLAYLIST_REQUEST_RENAME,
   PLAYLIST_REQUEST_DELETE,
   PLAYLIST_REQUEST_READ, // raw bytes of a file, for the console's `pl cat`
+  PLAYLIST_REQUEST_SPACE, // the card's size and free space (About)
 } playlist_request_t;
 
 typedef enum {
@@ -146,6 +148,12 @@ typedef struct {
   uint32_t length; // how many there are (0 at or past the end)
   uint8_t bytes[PLAYLIST_READ_BYTES];
 } playlist_bytes_t;
+
+// The card's size and free space, in bytes.
+typedef struct {
+  uint64_t total_bytes;
+  uint64_t free_bytes;
+} playlist_space_t;
 
 // Allocate everything (all of it in PSRAM, the task's stack included: see
 // MEMORY in playlist_task.c) and create the task (priority 2, core 0). Call
@@ -206,6 +214,12 @@ uint32_t playlist_task_delete(playlist_client_t client, const char *file);
 uint32_t playlist_task_read(playlist_client_t client, const char *file,
                             uint32_t offset);
 
+// The card's size and free space (playlist_space_t), for About. The task is
+// the UI's worker for the card: storage_space reads the card, and may take
+// a while the first time (storage.h), so the UI never calls it itself. Like
+// every request, it ends PLAYLIST_TASK_LIBRARY_BUSY while a scan runs.
+uint32_t playlist_task_space(playlist_client_t client);
+
 // --- Results -----------------------------------------------------------------
 //
 // Copy out the result of request `request` of `client`. False, with nothing
@@ -221,6 +235,8 @@ bool playlist_task_copy_load(playlist_client_t client, uint32_t request,
                              playlist_loaded_t *out);
 bool playlist_task_copy_bytes(playlist_client_t client, uint32_t request,
                               playlist_bytes_t *out);
+bool playlist_task_copy_space(playlist_client_t client, uint32_t request,
+                              playlist_space_t *out);
 
 // For the console: wait up to `timeout_ms` for the event of its request
 // `request`. Events of its earlier requests that come first (ones it gave

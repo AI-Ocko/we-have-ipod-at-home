@@ -82,6 +82,11 @@ typedef struct {
   uint32_t stack_free;  // bytes of the task's stack never used
   uint32_t passes;      // times round its loop: each is an event or a timeout
   uint32_t lcd_updates; // times the LCD was sent something
+  // The backlight and the sleep timer, as of the task's last pass.
+  bool lit;              // the backlight is on
+  uint32_t backlight;    // standby_backlight_t: 0 15 s, 1 30 s, 2 60 s, 3 on
+  uint32_t sleep_left_s; // until the timer runs out; 0 when it is off
+  bool fading;           // the sleep fade is running
 } ui_stats_t;
 
 void ui_get_stats(ui_stats_t *out);

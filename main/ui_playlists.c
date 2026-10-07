@@ -1103,6 +1103,8 @@ void ui_pl_on_event(ui_t *ui, const playlist_event_t *event, int64_t now_us) {
     break;
   case PLAYLIST_REQUEST_READ:
     break; // the console's only
+  case PLAYLIST_REQUEST_SPACE:
+    break; // About's: ui.c takes it
   default:
     on_edit(ui, event, now_us);
     break;

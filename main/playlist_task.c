@@ -65,8 +65,9 @@
 //     console only ever wants its newest. So the console cannot hold the
 //     task up, and never takes the UI's events.
 //
-// Big results (a listing, a load, a console read) live in buffers this
-// module owns, one per client and kind (s_slot), plus one spare per kind.
+// Results (a listing, a load, a console read, the card's free space) live
+// in buffers this module owns, one per client and kind (s_slot), plus one
+// spare per kind.
 // The task fills the spare, with no lock, for as long as the card takes:
 // no client can see the spare. Then, under s_lock, it swaps the spare with
 // the client's slot and writes the request's number into the slot; the old
@@ -290,13 +291,20 @@ static inline const uint16_t *request_tracks(const request_t *r) {
 
 // --- Memory ------------------------------------------------------------------
 
-enum { RESULT_CATALOG, RESULT_LOADED, RESULT_BYTES, RESULT_KINDS };
+enum {
+  RESULT_CATALOG,
+  RESULT_LOADED,
+  RESULT_BYTES,
+  RESULT_SPACE,
+  RESULT_KINDS
+};
 
 typedef struct {
   playlist_work_t work;
   playlist_catalog_t catalog[PLAYLIST_CLIENTS + 1];
   playlist_loaded_t loaded[PLAYLIST_CLIENTS + 1];
   playlist_bytes_t bytes[PLAYLIST_CLIENTS + 1];
+  playlist_space_t space[PLAYLIST_CLIENTS + 1];
   char path[PATH_BYTES];     // the playlist
   char tmp_path[PATH_BYTES]; // its .tmp
   char new_path[PATH_BYTES]; // a rename's new name; a tidied .tmp
@@ -407,6 +415,8 @@ const char *playlist_task_request_name(playlist_request_t kind) {
     return "delete";
   case PLAYLIST_REQUEST_READ:
     return "read";
+  case PLAYLIST_REQUEST_SPACE:
+    return "space";
   }
   return "?";
 }
@@ -567,6 +577,10 @@ uint32_t playlist_task_read(playlist_client_t client, const char *file,
   return submit(client, PLAYLIST_REQUEST_READ, file, NULL, NULL, 0, 0, offset);
 }
 
+uint32_t playlist_task_space(playlist_client_t client) {
+  return submit(client, PLAYLIST_REQUEST_SPACE, NULL, NULL, NULL, 0, 0, 0);
+}
+
 // --- Results (any task) --------------------------------------------------------
 
 // Take the lock and find `client`'s slot of `kind` if it answers `request`.
@@ -626,6 +640,17 @@ bool playlist_task_copy_bytes(playlist_client_t client, uint32_t request,
   out->offset = b->offset;
   out->length = b->length;
   memcpy(out->bytes, b->bytes, b->length);
+  slot_end();
+  return true;
+}
+
+bool playlist_task_copy_space(playlist_client_t client, uint32_t request,
+                              playlist_space_t *out) {
+  const playlist_space_t *p = slot_begin(RESULT_SPACE, client, request);
+  if (p == NULL) {
+    return false;
+  }
+  *out = *p;
   slot_end();
   return true;
 }
@@ -889,6 +914,19 @@ static playlist_outcome_t do_read(const request_t *r) {
   return PLAYLIST_TASK_DONE;
 }
 
+// The card's size and free space, from the FAT. See storage_space.
+static playlist_outcome_t do_space(const request_t *r) {
+  playlist_space_t *p = s_spare[RESULT_SPACE];
+  esp_err_t err = storage_space(&p->total_bytes, &p->free_bytes);
+  if (err != ESP_OK) {
+    ESP_LOGW(TAG, "cannot read the card's free space (%s)",
+             esp_err_to_name(err));
+    return PLAYLIST_TASK_CARD_ERROR;
+  }
+  publish(RESULT_SPACE, r);
+  return PLAYLIST_TASK_DONE;
+}
+
 // --- Saving ----------------------------------------------------------------------
 
 static playlist_outcome_t edit_outcome(playlist_result_t result) {
@@ -1110,7 +1148,8 @@ static playlist_outcome_t serve(const request_t *r,
     return PLAYLIST_TASK_BAD_NAME;
   }
   bool has_file = r->kind != PLAYLIST_REQUEST_LIST &&
-                  r->kind != PLAYLIST_REQUEST_CREATE;
+                  r->kind != PLAYLIST_REQUEST_CREATE &&
+                  r->kind != PLAYLIST_REQUEST_SPACE;
   if (has_file && !is_playlist_file(request_file(r))) {
     return PLAYLIST_TASK_NO_ENTRY;
   }
@@ -1147,6 +1186,9 @@ static playlist_outcome_t serve(const request_t *r,
     break;
   case PLAYLIST_REQUEST_READ:
     outcome = do_read(r);
+    break;
+  case PLAYLIST_REQUEST_SPACE:
+    outcome = do_space(r);
     break;
   }
   library_task_put();
@@ -1229,10 +1271,12 @@ esp_err_t playlist_task_start(QueueHandle_t ui_events) {
       s_slot[RESULT_CATALOG][c].result = &s_mem->catalog[c];
       s_slot[RESULT_LOADED][c].result = &s_mem->loaded[c];
       s_slot[RESULT_BYTES][c].result = &s_mem->bytes[c];
+      s_slot[RESULT_SPACE][c].result = &s_mem->space[c];
     }
     s_spare[RESULT_CATALOG] = &s_mem->catalog[PLAYLIST_CLIENTS];
     s_spare[RESULT_LOADED] = &s_mem->loaded[PLAYLIST_CLIENTS];
     s_spare[RESULT_BYTES] = &s_mem->bytes[PLAYLIST_CLIENTS];
+    s_spare[RESULT_SPACE] = &s_mem->space[PLAYLIST_CLIENTS];
     s_lock = lock;
     s_console_events = console;
     s_ring = rb;

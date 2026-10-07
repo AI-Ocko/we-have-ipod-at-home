@@ -31,7 +31,10 @@
 //   stat                     logs `stat state=... pos_ms=... vol=... fill=...
 //                            low=...` and more (see player_status.h), ending
 //                            with the UI task's numbers (ui.h): `ui_stack_free=
-//                            <bytes> ui_passes=<n> ui_lcd=<n>`
+//                            <bytes> ui_passes=<n> ui_lcd=<n> ui_light=<on|off>
+//                            ui_backlight=<0..3> ui_sleep_s=<n> ui_fading=<0|1>`
+//                            (the backlight, its setting as in `state`, the
+//                            seconds the sleep timer has left, 0 when off)
 //   stall <ms>               test aid: the decoder task does nothing for that
 //                            long (at most 30000), to force an underrun
 //   screen                   logs what the LCD was last told to show, each
@@ -98,13 +101,15 @@
 // (state_task.h):
 //
 //   state flash=<ok|unusable> volume=<n> shuffle=<0|1> loop=<0|1|2>
-//     position=<n> track=<n> elapsed_ms=<n> stack_free=<bytes>
+//     backlight=<0|1|2|3> position=<n> track=<n> elapsed_ms=<n>
+//     stack_free=<bytes>
 //                                                     (all on one line)
 //   state queue_file=present bytes=<n> count=<n> index=<8 hex digits>
 //     loaded_index=<8 hex digits> match=<yes|no> usable=<yes|no>
 //     unfinished=<yes|no>                             (all on one line)
 //
-// A value that is not saved is printed as `-`. `position` is the place in
+// A value that is not saved is printed as `-`. `backlight` is 0 for 15 s,
+// 1 for 30 s, 2 for 60 s and 3 for always on (standby.h). `position` is the place in
 // the queue, `track` the track number that was there, `elapsed_ms` the time
 // into it; `stack_free` is how much of the state task's stack has never
 // been used. `count` and `index` are what the queue file's header says: how
@@ -172,13 +177,14 @@
 //   pl down <n> <entry>
 //   pl mv <n> <name>
 //   pl del <n>
+//   pl free                  pl free total=<bytes> free=<bytes>
 //
 // and every request the command makes logs its event first:
 //
 //   pl event request=<number> kind=<kind> outcome=<outcome>[ name=<why>]
 //
 // <kind> is list, load, create, append, remove, move_up, move_down,
-// rename, delete or read; <outcome> is done, name in use, bad name,
+// rename, delete, read or space; <outcome> is done, name in use, bad name,
 // playlist full, no such entry, bad file, card error, library busy or
 // stale index; `name=` follows `bad name` and is empty, too long, bad
 // char, bad end or bad start. The command answers `ok ...` if its last

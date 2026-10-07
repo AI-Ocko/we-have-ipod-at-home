@@ -3,6 +3,7 @@
 #include "esp_err.h"
 #include "library.h"
 #include "play_queue.h"
+#include "standby.h"
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -64,7 +65,7 @@
 //      the queue does not have the track does it stand, and the track there
 //      starts from its beginning.
 //
-// The volume is only in flash.
+// The volume and the backlight setting are only in flash.
 
 // The longest queue that is saved, in tracks: the size of this task's copies.
 // The UI's queue has this capacity or less.
@@ -77,6 +78,7 @@ typedef struct {
   int volume; // 0..PCM_VOLUME_MAX
   bool shuffle;
   play_loop_t loop;
+  standby_backlight_t backlight; // how long the backlight stays on
 } state_settings_t;
 
 // Where playback was. `position` is the place in the queue's play order,
@@ -98,10 +100,11 @@ typedef struct {
 // nothing is (ESP_ERR_NO_MEM, logged). The player runs either way.
 esp_err_t state_task_start(void);
 
-// --- Settings: volume, shuffle, loop ---------------------------------------
+// --- Settings: volume, shuffle, loop, backlight -----------------------------
 
 // What was in flash at start-up; the default (volume 10, shuffle off, loop
-// off) for each value that was not there or was out of range. Never blocks.
+// off, backlight 30 s) for each value that was not there or was out of
+// range. Never blocks.
 void state_task_loaded_settings(state_settings_t *out);
 
 // Hand over the settings as they now are. Costs a few instructions in a
@@ -177,8 +180,9 @@ void state_task_save_queue(const play_queue_t *q, uint32_t index_checksum);
 // What is saved right now, read back from flash and from the card.
 typedef struct {
   bool flash; // flash can be used at all
-  bool has_volume, has_shuffle, has_loop, has_position; // each is in flash
-  uint8_t volume, shuffle, loop; // as stored, meaningful if has_*
+  bool has_volume, has_shuffle, has_loop, has_backlight,
+      has_position;                         // each is in flash
+  uint8_t volume, shuffle, loop, backlight; // as stored, meaningful if has_*
   state_position_t position;
 
   bool file;           // /.dap/queue.bin exists

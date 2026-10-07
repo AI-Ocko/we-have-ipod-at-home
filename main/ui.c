@@ -16,6 +16,7 @@
 #include "player_status.h"
 #include "playlist_task.h"
 #include "screen.h"
+#include "standby.h"
 #include "state_task.h"
 #include "ui_state.h"
 #include <inttypes.h>
@@ -86,7 +87,11 @@
 //                Choosing a track in a list comes here, and so does
 //                power-on if a track was remembered.
 //   KEYTEST      the key test screen: keytest_*.
-//   ABOUT        two facts: about_tracks and the firmware's build date.
+//   ABOUT        about_tracks on the top row; the card's free space and the
+//                firmware's build date as a marquee on the bottom row. The
+//                free space is asked of the playlist task when About opens
+//                (it reads the card; this task never does) and comes back
+//                as an event: "Free ..." until then, "Free ?" if it failed.
 //
 // LAYERS
 //
@@ -125,6 +130,10 @@
 // marquee's next step. There is one sleep and no timer.
 //
 // KEYS
+//
+// Every key event goes to standby_key first, before anything else (the key
+// test included): the press that wakes the backlight, and that key's long
+// press, repeats and release, are dropped there (STANDBY).
 //
 // On the key test screen every event is shown and none acted on, except a
 // long press of `*`, which leaves. Everywhere else a key goes first to the
@@ -165,6 +174,53 @@
 // only if it is of the key skip_key names and Now Playing is still up. So
 // the 6 that chose a track in a list, and is let go on Now Playing, skips
 // nothing: its press was not made there.
+//
+// STANDBY: THE BACKLIGHT AND THE SLEEP TIMER
+//
+// standby.h decides; this file carries out what it decides. `standby` holds
+// the backlight timeout, the sleep timer and the fade, as times in ms of
+// esp_timer's clock; it is moved on by standby_tick at the top of every pass
+// (step 2), and standby_deadline is one of the times step 5 sleeps until, so
+// the backlight going off, the timer running out and each step of the fade's
+// volume all happen with nothing polled. The timers count whatever else
+// happens: a scan, a card removed, any screen. Nothing here touches the card.
+//
+//   the backlight  standby.lit is what it should be; lcd_lit is what the LCD
+//                  was last told. They are compared once per pass and the
+//                  LCD switched only when they differ, whatever changed lit
+//                  (a timeout, the sleep timer, the fade's end, a key).
+//   the fade       when the timer runs out while a track plays, the volume
+//                  steps down from the setting to 0 over STANDBY_FADE_MS:
+//                  each level goes to the player (player_set_volume) and
+//                  nowhere else. ui->settings.volume, which is what the
+//                  state task is handed, never changes, so the fade is never
+//                  saved, and a reset during it starts at the setting.
+//   its end        standby_tick says STOP: the player is stopped as the
+//                  console's `stop` stops it (ui_play_stop), the backlight
+//                  goes off (standby has made lit false), and the volume
+//                  goes back to the setting UI_VOLUME_BACK_MS later.
+//   a cancel       a key press during the fade (standby_key ends it), or
+//                  playback that is no longer playing: paused, stopped (the
+//                  console, a scan) or come to rest at the end of the queue.
+//                  The last is checked once per pass after the events: a
+//                  fade is running and nothing plays (ui_playing) means
+//                  standby_set_sleep(OFF). A gap between two tracks of the
+//                  queue is not "nothing plays": the next track is started in
+//                  the same call that saw the last one end, and a "Can't
+//                  play" notice is on its way to the next track. A pause
+//                  while the timer is still counting changes nothing.
+//   the volume     after a cancel it goes back at the end of that pass if a
+//                  track is still playing (a key that is not a pause); if not
+//                  (a pause, a stop), UI_VOLUME_BACK_MS later: the player
+//                  stops or pauses a moment after it is told to, fading out
+//                  what it was playing, and that should fade from where the
+//                  sleep fade had got to, not from the full setting. Playback
+//                  starting again, or A or B, brings it back at once.
+//
+// The Settings rows read settings_view (browse_set_settings). It is brought
+// up to date each pass; when the Settings screen is up the list's copy is
+// renewed when a value changes, and the moment the minutes left next change
+// is one of the times the loop sleeps until.
 //
 // THE INDEX
 //
@@ -257,6 +313,14 @@ static SemaphoreHandle_t s_report_done;
 static portMUX_TYPE s_report_lock = portMUX_INITIALIZER_UNLOCKED;
 static ui_queue_report_t s_report;
 
+// The backlight and the sleep timer for the console's `stat`: copied by the
+// UI task once per pass, inside s_standby_lock.
+static portMUX_TYPE s_standby_lock = portMUX_INITIALIZER_UNLOCKED;
+static bool s_standby_lit = true;
+static uint32_t s_standby_backlight;
+static int64_t s_standby_sleep_at_ms = INT64_MAX;
+static bool s_standby_fading;
+
 // What the task that waits for the card tells the UI task (ui_card_waiting).
 // The UI task owns the LCD, so the task that waits for the card cannot draw
 // the "insert card" screen itself; it sends one of these instead.
@@ -282,6 +346,211 @@ const library_t *ui_index_get(const ui_t *ui) {
     return NULL;
   }
   return library_task_get();
+}
+
+// --- standby: the backlight and the sleep timer (see STANDBY) ----------------
+
+static const char *const BACKLIGHT_NAME[STANDBY_BACKLIGHT_COUNT] = {
+    "15 s", "30 s", "60 s", "on"};
+static const uint32_t SLEEP_MINUTES[STANDBY_SLEEP_COUNT] = {0, 15, 30, 60};
+
+static bool ui_fading(const ui_t *ui) {
+  return ui->standby.fade_from_ms != INT64_MAX;
+}
+
+// Whether a track is playing, as far as the sleep timer is concerned: one is
+// the player's or on its way to it (a notice that gives way to the next
+// track), and it is not paused.
+static bool ui_playing(const ui_t *ui, const player_status_t *status) {
+  return (ui->play.active || ui->play.notice_until_us != 0) &&
+         status->state != PLAYER_STATE_PAUSED;
+}
+
+// The player's volume back to the setting.
+static void ui_volume_back(ui_t *ui) {
+  player_set_volume(ui->settings.volume);
+  ESP_LOGI(TAG, "SLEEP volume back to %d", ui->settings.volume);
+  ui->fade_volume = -1;
+  ui->volume_back = false;
+  ui->volume_back_ms = INT64_MAX;
+}
+
+// The fade has ended before its end: its volume goes back (when: see
+// ui_standby_after_events).
+static void ui_fade_cancelled(ui_t *ui, const char *why) {
+  ESP_LOGI(TAG, "SLEEP fade cancelled (%s)", why);
+  ui->volume_back = true;
+  ui->volume_back_ms = INT64_MAX;
+}
+
+// Switch the LCD's backlight if it is not what standby says.
+static void ui_backlight_sync(ui_t *ui) {
+  if (ui->standby.lit == ui->lcd_lit) {
+    return;
+  }
+  ui->lcd_lit = ui->standby.lit;
+  // The driver keeps the bit even if this transfer fails, and sends it with
+  // the next one.
+  esp_err_t err = lcd_set_backlight(ui->lcd_lit);
+  ESP_LOGI(TAG, "BACKLIGHT %s%s", ui->lcd_lit ? "on" : "off",
+           err == ESP_OK ? "" : " (not sent to the LCD)");
+}
+
+// Step 2 of a pass: whatever time has come for the backlight, the timer and
+// the fade.
+static void ui_standby_on_time(ui_t *ui, const player_status_t *status,
+                               int64_t now_ms) {
+  if (ui->volume_back && now_ms >= ui->volume_back_ms) {
+    ui_volume_back(ui);
+  }
+  bool timer_on = ui->standby.sleep_at_ms != INT64_MAX;
+  uint32_t acts = standby_tick(&ui->standby, ui_playing(ui, status), now_ms);
+  if (acts & STANDBY_ACT_FADE) {
+    ESP_LOGI(TAG, "SLEEP timer ran out: fading over %d ms", STANDBY_FADE_MS);
+  } else if (timer_on && ui->standby.sleep_at_ms == INT64_MAX &&
+             !ui_fading(ui)) {
+    ESP_LOGI(TAG, "SLEEP timer ran out with nothing playing");
+  }
+  if (acts & STANDBY_ACT_STOP) {
+    // Silent first: the stop takes a moment.
+    player_set_volume(0);
+    ui->fade_volume = 0;
+    ESP_LOGI(TAG, "SLEEP fade over: stopping");
+    ui_play_stop(ui);
+    // standby has made lit false: the backlight goes off below.
+    ui->volume_back = true;
+    ui->volume_back_ms = now_ms + UI_VOLUME_BACK_MS;
+  }
+  if (ui_fading(ui)) {
+    int level = standby_fade_level(&ui->standby, ui->settings.volume, now_ms);
+    if (level != ui->fade_volume) {
+      player_set_volume(level);
+      ui->fade_volume = level;
+      ESP_LOGI(TAG, "FADE volume=%d", level);
+    }
+  }
+  ui_backlight_sync(ui);
+}
+
+// After a pass's events: a fade with nothing playing is over, and a volume
+// that is to go back is given its time.
+static void ui_standby_after_events(ui_t *ui, int64_t now_ms) {
+  player_status_t status;
+  player_get_status(&status);
+  bool playing = ui_playing(ui, &status);
+  if (ui_fading(ui) && !playing) {
+    standby_set_sleep(&ui->standby, STANDBY_SLEEP_OFF, now_ms);
+    ui_fade_cancelled(ui, "playback paused or stopped");
+  }
+  if (ui->volume_back) {
+    if (playing) {
+      ui_volume_back(ui);
+    } else if (ui->volume_back_ms == INT64_MAX) {
+      ui->volume_back_ms = now_ms + UI_VOLUME_BACK_MS;
+    }
+  }
+}
+
+static bool ui_settings_up(const ui_t *ui) {
+  return ui_list_seen(ui) &&
+         ui->browse.levels[ui->browse.depth].screen == BROWSE_SETTINGS;
+}
+
+// What the Settings rows show, brought up to date. The list's copy is
+// renewed if it changed while they are up.
+static void ui_settings_view(ui_t *ui, int64_t now_ms) {
+  browse_settings_t view = {
+      .backlight = ui->standby.backlight,
+      .sleep_minutes = standby_sleep_minutes(&ui->standby, now_ms),
+  };
+  if (view.backlight != ui->settings_view.backlight ||
+      view.sleep_minutes != ui->settings_view.sleep_minutes) {
+    ui->settings_view = view;
+    if (ui_settings_up(ui)) {
+      ui->list_dirty = true;
+    }
+  }
+}
+
+// The next time anything of the above is due, or INT64_MAX.
+static int64_t ui_standby_deadline(const ui_t *ui, int64_t now_ms) {
+  int64_t next =
+      standby_deadline(&ui->standby, ui->settings.volume, now_ms);
+  if (ui->volume_back && ui->volume_back_ms < next) {
+    next = ui->volume_back_ms;
+  }
+  // The minutes left on the Settings row: they change when the time left
+  // drops to a whole number of minutes.
+  uint32_t minutes = ui->settings_view.sleep_minutes;
+  if (minutes > 1 && ui_settings_up(ui)) {
+    int64_t step = ui->standby.sleep_at_ms - (int64_t)(minutes - 1) * 60000;
+    if (step < next) {
+      next = step;
+    }
+  }
+  return next;
+}
+
+// 5 or 6 on the Backlight row: the next timeout, saved with the settings.
+static void ui_next_backlight(ui_t *ui, int64_t now_ms) {
+  standby_backlight_t next =
+      (standby_backlight_t)((ui->standby.backlight + 1) %
+                            STANDBY_BACKLIGHT_COUNT);
+  standby_set_backlight(&ui->standby, next, now_ms);
+  ui->settings.backlight = next;
+  state_task_save_settings(&ui->settings);
+  ESP_LOGI(TAG, "BACKLIGHT setting %s", BACKLIGHT_NAME[next]);
+}
+
+// 5 or 6 on the Sleep timer row: the next of off, 15, 30, 60 after the one
+// last chosen, counted from now.
+static void ui_next_sleep(ui_t *ui, int64_t now_ms) {
+  standby_sleep_t next = standby_next_sleep(&ui->standby);
+  standby_set_sleep(&ui->standby, next, now_ms);
+  if (next == STANDBY_SLEEP_OFF) {
+    ESP_LOGI(TAG, "SLEEP timer off");
+  } else {
+    ESP_LOGI(TAG, "SLEEP timer %" PRIu32 " min", SLEEP_MINUTES[next]);
+  }
+}
+
+// For the console (ui_get_stats): a few words, copied once per pass.
+static void ui_publish_standby(const ui_t *ui) {
+  portENTER_CRITICAL(&s_standby_lock);
+  s_standby_lit = ui->standby.lit;
+  s_standby_backlight = (uint32_t)ui->standby.backlight;
+  s_standby_sleep_at_ms = ui->standby.sleep_at_ms;
+  s_standby_fading = ui_fading(ui);
+  portEXIT_CRITICAL(&s_standby_lock);
+}
+
+// --- About -------------------------------------------------------------------
+
+// About has opened: ask the playlist task for the card's free space.
+static void ui_about_open(ui_t *ui, int64_t now_us) {
+  ui->mode = UI_MODE_ABOUT;
+  ui->about_since_us = now_us;
+  ui->about_space_request = playlist_task_space(PLAYLIST_CLIENT_UI);
+  ui->about_space =
+      ui->about_space_request != 0 ? UI_SPACE_WAITING : UI_SPACE_UNKNOWN;
+}
+
+// The answer. One for an earlier opening of About is not this one's.
+static void ui_about_on_space(ui_t *ui, const playlist_event_t *event,
+                              int64_t now_us) {
+  if (event->request == 0 || event->request != ui->about_space_request) {
+    return;
+  }
+  ui->about_space_request = 0;
+  playlist_space_t space;
+  if (event->outcome == PLAYLIST_TASK_DONE &&
+      playlist_task_copy_space(PLAYLIST_CLIENT_UI, event->request, &space)) {
+    ui->about_space = UI_SPACE_KNOWN;
+    ui->about_free_bytes = space.free_bytes;
+  } else {
+    ui->about_space = UI_SPACE_UNKNOWN;
+  }
+  ui->about_since_us = now_us; // new words: read from their beginning
 }
 
 // --- the menus ---------------------------------------------------------------
@@ -392,8 +661,11 @@ static void ui_select(ui_t *ui, char key, int64_t now_us) {
     }
     break;
   case BROWSE_BACKLIGHT:
+    ui_next_backlight(ui, now_us / 1000); // the row: ui_settings_view
+    break;
   case BROWSE_SLEEP:
-    break; // nothing yet: Task 2 of stage 8 wires these to standby
+    ui_next_sleep(ui, now_us / 1000);
+    break;
   case BROWSE_KEYTEST:
     ui->mode = UI_MODE_KEYTEST;
     ui->keytest_any = false;
@@ -402,7 +674,7 @@ static void ui_select(ui_t *ui, char key, int64_t now_us) {
     ui->overlay_until_us = 0;
     break;
   case BROWSE_ABOUT:
-    ui->mode = UI_MODE_ABOUT;
+    ui_about_open(ui, now_us);
     break;
   case BROWSE_NEW_PLAYLIST:
     ui_text_open(ui, UI_TEXT_NEW, NULL, now_us);
@@ -603,6 +875,19 @@ static void ui_on_key(ui_t *ui, const key_event_t *event, int64_t now_us) {
     return;
   }
   log_key(ui, event);
+  // Before anything else (STANDBY). A press during the fade ends it.
+  bool was_fading = ui_fading(ui);
+  bool act = standby_key(&ui->standby, event->key, event->type, now_us / 1000);
+  if (was_fading && !ui_fading(ui)) {
+    ui_fade_cancelled(ui, "a key");
+  }
+  if (!act) {
+    if (event->type == KEY_PRESS) {
+      ESP_LOGI(TAG, "KEY %c woke the backlight and does nothing else",
+               event->key);
+    }
+    return;
+  }
   if (event->type == KEY_PRESS) {
     ui->skip_key = '\0'; // a new press: whatever was held before is over
   }
@@ -619,6 +904,15 @@ static void ui_on_key(ui_t *ui, const key_event_t *event, int64_t now_us) {
   case 'A':
   case 'B':
     if (step) {
+      // A volume key held down when the fade began: its repeats change the
+      // volume, so the fade is over (and is never saved).
+      if (ui_fading(ui)) {
+        standby_set_sleep(&ui->standby, STANDBY_SLEEP_OFF, now_us / 1000);
+        ui_fade_cancelled(ui, "a volume key");
+      }
+      if (ui->volume_back) {
+        ui_volume_back(ui); // from the setting, not from a faded level
+      }
       player_get_status(&status);
       int level = status.volume + (event->key == 'A' ? 1 : -1);
       if (level >= 0 && level <= PCM_VOLUME_MAX) {
@@ -745,7 +1039,11 @@ static void ui_take(ui_t *ui, QueueSetMemberHandle_t ready, int64_t now_us) {
   } else if (ready == s_playlist_events) {
     playlist_event_t event;
     if (xQueueReceive(s_playlist_events, &event, 0) == pdTRUE) {
-      ui_pl_on_event(ui, &event, now_us);
+      if (event.kind == PLAYLIST_REQUEST_SPACE) {
+        ui_about_on_space(ui, &event, now_us);
+      } else {
+        ui_pl_on_event(ui, &event, now_us);
+      }
     }
   }
   // A reload the playlist task refused, asked for again (ui_playlists.c).
@@ -807,19 +1105,30 @@ static void ui_task(void *arg) {
   state_task_loaded_settings(&ui.settings);
   ui_play_init(&ui, s_queue_orders);
   ui_pl_init(&ui, s_pl);
+  standby_init(&ui.standby, ui.settings.backlight,
+               esp_timer_get_time() / 1000);
+  ui.lcd_lit = true; // lcd_init leaves it on
+  ui.fade_volume = -1;
+  ui.volume_back_ms = INT64_MAX;
+  ui.settings_view.backlight = ui.standby.backlight;
+  browse_set_settings(&ui.browse, &ui.settings_view);
   screen_t shown;        // what the LCD was last told to show
   bool shown_ok = false; // and it took it
 
   for (;;) {
     atomic_fetch_add(&s_passes, 1);
     int64_t now_us = esp_timer_get_time();
+    int64_t now_ms = now_us / 1000;
+    player_status_t player;
+    player_get_status(&player);
+    ui_standby_on_time(&ui, &player, now_ms);
     ui_play_on_time(&ui, now_us);
     ui_text_on_time(&ui, now_us);
+    ui_settings_view(&ui, now_ms);
     if (ui.list_dirty && ui_list_on_show(&ui)) {
       ui_fill_list(&ui, now_us);
     }
-    player_status_t player;
-    player_get_status(&player);
+    player_get_status(&player); // after whatever the times above did
     screen_t wanted;
     ui_render(&ui, &player, now_us, &wanted);
     // Most events change nothing that is on the screen (a key release, a
@@ -836,8 +1145,18 @@ static void ui_task(void *arg) {
       }
     }
 
-    QueueSetMemberHandle_t ready = xQueueSelectFromSet(
-        s_ui_events, ticks_until(ui_next_change_ms(&ui, now_us)));
+    uint32_t wait_ms = ui_next_change_ms(&ui, now_us);
+    int64_t standby_ms = ui_standby_deadline(&ui, now_ms);
+    if (standby_ms != INT64_MAX) {
+      // now_ms is rounded down, so this wakes at or after the deadline.
+      int64_t left = standby_ms > now_ms ? standby_ms - now_ms : 0;
+      if (left < (int64_t)wait_ms) {
+        wait_ms = (uint32_t)left;
+      }
+    }
+    ui_publish_standby(&ui);
+    QueueSetMemberHandle_t ready =
+        xQueueSelectFromSet(s_ui_events, ticks_until(wait_ms));
     // Everything that is waiting, in the order it was posted, before the
     // screen is drawn once. If nothing was (the wait ran out), something is
     // due by itself and the next pass does it.
@@ -849,6 +1168,7 @@ static void ui_task(void *arg) {
     if (atomic_exchange(&s_stop_wanted, false)) {
       ui_play_stop(&ui);
     }
+    ui_standby_after_events(&ui, now_us / 1000);
     if (atomic_exchange(&s_report_wanted, false)) {
       ui_answer_report(&ui);
     }
@@ -936,6 +1256,16 @@ void ui_get_stats(ui_stats_t *out) {
   out->stack_free = s_task ? uxTaskGetStackHighWaterMark(s_task) : 0;
   out->passes = atomic_load(&s_passes);
   out->lcd_updates = atomic_load(&s_lcd_updates);
+  portENTER_CRITICAL(&s_standby_lock);
+  out->lit = s_standby_lit;
+  out->backlight = s_standby_backlight;
+  int64_t sleep_at_ms = s_standby_sleep_at_ms;
+  out->fading = s_standby_fading;
+  portEXIT_CRITICAL(&s_standby_lock);
+  int64_t now_ms = esp_timer_get_time() / 1000;
+  out->sleep_left_s = sleep_at_ms == INT64_MAX || sleep_at_ms <= now_ms
+                          ? 0
+                          : (uint32_t)((sleep_at_ms - now_ms + 999) / 1000);
 }
 
 void ui_stop(void) {

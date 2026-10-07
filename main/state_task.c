@@ -39,11 +39,12 @@
 //
 // SETTINGS AND POSITION: FLASH (NVS)
 //
-// Namespace "dap", four items:
+// Namespace "dap", five items:
 //
 //   volume    u8   0..20
 //   shuffle   u8   0 or 1
 //   loop      u8   play_loop_t
+//   backlight u8   standby_backlight_t (15 s, 30 s, 60 s, always on)
 //   position  u64  queue position << 48 | track number << 32 | elapsed ms
 //
 // The UI's side is two small values behind a spinlock (s_lock): the settings
@@ -272,6 +273,7 @@
 #define KEY_VOLUME "volume"
 #define KEY_SHUFFLE "shuffle"
 #define KEY_LOOP "loop"
+#define KEY_BACKLIGHT "backlight"
 #define KEY_POSITION "position"
 
 #define DEFAULT_VOLUME 10 // the player's own starting level
@@ -306,7 +308,8 @@ static SemaphoreHandle_t s_answered;  // the console's two calls wait on it
 // --- Settings and position ---------------------------------------------------
 
 // What was read at start-up. Written before the task exists, never after.
-static state_settings_t s_loaded_settings = {.volume = DEFAULT_VOLUME};
+static state_settings_t s_loaded_settings = {
+    .volume = DEFAULT_VOLUME, .backlight = STANDBY_BACKLIGHT_30S};
 static state_position_t s_loaded_position;
 static bool s_loaded_has_position;
 
@@ -325,6 +328,7 @@ static bool s_flash_ok;
 static int s_flash_volume = -1;
 static int s_flash_shuffle = -1;
 static int s_flash_loop = -1;
+static int s_flash_backlight = -1;
 static bool s_flash_has_position;
 static uint64_t s_flash_position;
 
@@ -362,9 +366,13 @@ void state_task_save_settings(const state_settings_t *settings) {
   if (s.loop != PLAY_LOOP_ALL && s.loop != PLAY_LOOP_ONE) {
     s.loop = PLAY_LOOP_OFF;
   }
+  if ((unsigned)s.backlight >= STANDBY_BACKLIGHT_COUNT) {
+    s.backlight = STANDBY_BACKLIGHT_30S;
+  }
   portENTER_CRITICAL(&s_lock);
   bool changed = !s_want_settings || s.volume != s_settings.volume ||
-                 s.shuffle != s_settings.shuffle || s.loop != s_settings.loop;
+                 s.shuffle != s_settings.shuffle || s.loop != s_settings.loop ||
+                 s.backlight != s_settings.backlight;
   s_settings = s;
   s_want_settings = true;
   portEXIT_CRITICAL(&s_lock);
@@ -426,6 +434,7 @@ static void load_flash(void) {
   s_flash_volume = read_u8(KEY_VOLUME);
   s_flash_shuffle = read_u8(KEY_SHUFFLE);
   s_flash_loop = read_u8(KEY_LOOP);
+  s_flash_backlight = read_u8(KEY_BACKLIGHT);
   s_flash_has_position =
       nvs_get_u64(s_nvs, KEY_POSITION, &s_flash_position) == ESP_OK;
 
@@ -437,6 +446,9 @@ static void load_flash(void) {
   }
   if (s_flash_loop >= PLAY_LOOP_OFF && s_flash_loop <= PLAY_LOOP_ONE) {
     s_loaded_settings.loop = (play_loop_t)s_flash_loop;
+  }
+  if (s_flash_backlight >= 0 && s_flash_backlight < STANDBY_BACKLIGHT_COUNT) {
+    s_loaded_settings.backlight = (standby_backlight_t)s_flash_backlight;
   }
   if (s_flash_has_position) {
     unpack_position(s_flash_position, &s_loaded_position);
@@ -478,6 +490,8 @@ static void save_flash(void) {
     save_u8(KEY_VOLUME, settings.volume, &s_flash_volume, &wrote);
     save_u8(KEY_SHUFFLE, settings.shuffle ? 1 : 0, &s_flash_shuffle, &wrote);
     save_u8(KEY_LOOP, (int)settings.loop, &s_flash_loop, &wrote);
+    save_u8(KEY_BACKLIGHT, (int)settings.backlight, &s_flash_backlight,
+            &wrote);
   }
   if (want_position &&
       !(s_flash_has_position && s_flash_position == position)) {
@@ -499,17 +513,18 @@ static void save_flash(void) {
   if (err != ESP_OK) {
     // Nothing is known about what flash holds now: write it all next time.
     ESP_LOGW(TAG, "could not save to flash (%s)", esp_err_to_name(err));
-    s_flash_volume = s_flash_shuffle = s_flash_loop = -1;
+    s_flash_volume = s_flash_shuffle = s_flash_loop = s_flash_backlight = -1;
     s_flash_has_position = false;
     return;
   }
   // One line per save, naming only what was written.
-  char text[96];
+  char text[128];
   int n = 0;
   text[0] = '\0';
   if (wrote) {
-    n = snprintf(text, sizeof(text), " volume=%d shuffle=%d loop=%d",
-                 s_flash_volume, s_flash_shuffle, s_flash_loop);
+    n = snprintf(text, sizeof(text),
+                 " volume=%d shuffle=%d loop=%d backlight=%d", s_flash_volume,
+                 s_flash_shuffle, s_flash_loop, s_flash_backlight);
   }
   if (wrote_position) {
     state_position_t p;
@@ -953,6 +968,8 @@ static void report(state_report_t *r) {
     r->has_volume = (nvs_get_u8(s_nvs, KEY_VOLUME, &r->volume) == ESP_OK);
     r->has_shuffle = (nvs_get_u8(s_nvs, KEY_SHUFFLE, &r->shuffle) == ESP_OK);
     r->has_loop = (nvs_get_u8(s_nvs, KEY_LOOP, &r->loop) == ESP_OK);
+    r->has_backlight =
+        (nvs_get_u8(s_nvs, KEY_BACKLIGHT, &r->backlight) == ESP_OK);
     r->has_position = (nvs_get_u64(s_nvs, KEY_POSITION, &packed) == ESP_OK);
     if (r->has_position) {
       unpack_position(packed, &r->position);
@@ -1023,7 +1040,7 @@ static bool clear(void) {
       ESP_LOGW(TAG, "could not erase the settings (%s)", esp_err_to_name(err));
       ok = false;
     }
-    s_flash_volume = s_flash_shuffle = s_flash_loop = -1;
+    s_flash_volume = s_flash_shuffle = s_flash_loop = s_flash_backlight = -1;
     s_flash_has_position = false;
   }
   if (unlink(QUEUE_PATH) != 0 && errno != ENOENT) {
@@ -1151,9 +1168,11 @@ esp_err_t state_task_start(void) {
     load_flash();
   }
   ESP_LOGI(TAG,
-           "loaded in %" PRIu32 " us: volume=%d shuffle=%d loop=%d%s",
+           "loaded in %" PRIu32 " us: volume=%d shuffle=%d loop=%d "
+           "backlight=%d%s",
            us_since(start), s_loaded_settings.volume,
            (int)s_loaded_settings.shuffle, (int)s_loaded_settings.loop,
+           (int)s_loaded_settings.backlight,
            s_loaded_has_position ? "" : ", no position");
   if (s_loaded_has_position) {
     ESP_LOGI(TAG,

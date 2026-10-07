@@ -52,3 +52,10 @@ void storage_unmount(void) {
 }
 
 bool storage_is_mounted(void) { return s_card != NULL; }
+
+esp_err_t storage_space(uint64_t *total_bytes, uint64_t *free_bytes) {
+  if (!s_card) {
+    return ESP_ERR_INVALID_STATE;
+  }
+  return esp_vfs_fat_info(STORAGE_MOUNT_POINT, total_bytes, free_bytes);
+}
