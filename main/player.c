@@ -502,13 +502,13 @@ static esp_es_parse_err_t flac_parse_frame(esp_es_parse_raw_t *in,
 //
 // The codec library takes all its memory through four functions it defines
 // as weak symbols (media_lib_module_malloc, _calloc, _realloc and
-// media_lib_free); the versions here replace them. The library's own call
-// plain malloc, which puts a block of up to 16 KB in internal RAM wherever
-// there is room, falling back to PSRAM, and a larger one in PSRAM
-// (CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL). A stereo FLAC decoder takes about
-// 52 KB of internal RAM that way (its state, 8.4 KB; its bit reader, 8 KB;
-// one 16 KB residual array per channel; its output arrays are 16400 bytes
-// each and so are in PSRAM) and an MP3 decoder about 28 KB, all given back
+// media_lib_free); the versions here replace them. The library's own
+// versions call plain malloc, which puts a block of up to 16 KB in internal
+// RAM wherever there is room, falling back to PSRAM, and a larger one in
+// PSRAM (CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL). A stereo FLAC decoder takes
+// about 52 KB of internal RAM that way (its state, 8.4 KB; its bit reader,
+// 8 KB; one 16 KB residual array per channel; its output arrays are 16400
+// bytes each and so are in PSRAM) and an MP3 decoder about 28 KB, all given back
 // when the track ends. Measured in the stage 8 soak (stage8-soak.md): while
 // a FLAC played, its two residual arrays took the middle of the largest free
 // block (47 KB) and left 14 KB, and with each track the decoder's memory

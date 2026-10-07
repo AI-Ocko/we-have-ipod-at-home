@@ -10,7 +10,11 @@ MP3 from an SD card, a PCM5102A I2S DAC, a 16x2 LCD and a 4x4 keypad.
 - FLAC and MP3, 8 to 96 kHz, sent to the DAC as 24-bit audio; volume in 21
   steps.
 - A library index of the whole card (tags, any folder layout), browsed by
-  artist, album, song and playlist; letter jumps in A-to-Z lists.
+  artist, album, song and playlist; letter jumps in A-to-Z lists. A card with
+  more tracks than the index holds (about 7,400) is scanned until it is full
+  and says `Library full`.
+- Recovery from a card pulled out while running, with no reset: the player
+  waits for it, reloads the library and carries on with the same queue.
 - A play queue: play next, add to queue, shuffle, loop all or one.
 - M3U playlists made and edited on the device (create, add, rename, delete,
   reorder, remove, save the queue), and computer-made playlists read with

@@ -124,8 +124,8 @@ typedef struct {
   uint32_t play_id; // the `play` that is this track's: its events count
   uint32_t min_id;  // events with a lower number are old news
   bool active;      // that play has not ended, failed or been stopped
-  bool started;     // its STARTED has come: the player's position is
-                    // this track's
+  bool started;     // its STARTED has come, so the position the player
+                    // reports is this track's
   // A stop the player refused (its command queue full) after it refused
   // this track's `play`: sent again with the next event of the track it
   // is still playing (ui_play.c, A PLAY THE PLAYER REFUSES).

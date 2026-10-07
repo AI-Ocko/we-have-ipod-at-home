@@ -32,9 +32,10 @@
 //                            low=...` and more (see player_status.h), ending
 //                            with the UI task's numbers (ui.h): `ui_stack_free=
 //                            <bytes> ui_passes=<n> ui_lcd=<n> ui_light=<on|off>
-//                            ui_backlight=<0..3> ui_sleep_s=<n> ui_fading=<0|1>`
-//                            (the backlight, its setting as in `state`, the
-//                            seconds the sleep timer has left, 0 when off)
+//                            ui_backlight=<0..3> ui_sleep_s=<n>
+//                            ui_fading=<0|1>` (the backlight, its setting as
+//                            in `state`, the seconds the sleep timer has
+//                            left, 0 when off)
 //                            Its heap figures, in bytes: `heap_int` and
 //                            `heap_int_largest` are internal RAM free and its
 //                            largest free block counting IRAM-only heap,

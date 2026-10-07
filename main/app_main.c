@@ -24,7 +24,7 @@
 #define CARD_FREE_NAG_MS 5000
 #define CARD_STOP_AGAIN_MS 1000
 // The card task (look_after_card): the main task's priority and core.
-#define CARD_TASK_STACK_BYTES 6144
+#define CARD_TASK_STACK_BYTES 8192
 #define CARD_TASK_PRIORITY 1
 #define CARD_TASK_CORE 0
 

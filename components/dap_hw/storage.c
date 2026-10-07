@@ -133,7 +133,12 @@ void storage_wait_failure(void) {
   xSemaphoreTake(s_failed, portMAX_DELAY);
 }
 
-void storage_forget_failures(void) { xSemaphoreTake(s_failed, 0); }
+void storage_forget_failures(void) {
+  xSemaphoreTake(s_failed, 0);
+  // A `card lost` typed while the card was out is forgotten too, or the
+  // next harmless report would unmount the good card that came back.
+  atomic_store(&s_simulated, false);
+}
 
 bool storage_card_answers(void) {
   bool answers = false;

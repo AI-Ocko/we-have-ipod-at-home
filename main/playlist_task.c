@@ -237,9 +237,11 @@
 // Each request is served under a hold on the card (storage.h), so the card
 // is not unmounted in the middle of one. With no card (none yet, or one
 // pulled out: the hold is refused) a request answers card error at once.
-// Without an index (a scan is running) a request answers library busy at
-// once (see THE INDEX). A read or write that fails answers card error, with
-// the files as the notes above leave them, and is reported
+// While the library is being loaded or scanned a request answers library
+// busy at once; with no index and none coming, only a request that needs
+// track numbers does, and the rest are served (see THE INDEX). A read or
+// write that fails answers card error, with the files as the notes above
+// leave them, and is reported
 // (storage_report_failure: the task that mounts the card then asks the card
 // whether it still answers). A card pulled out during a save leaves the
 // files as a power cut at that moment would, and the next listing after it

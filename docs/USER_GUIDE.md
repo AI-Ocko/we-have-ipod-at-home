@@ -166,6 +166,8 @@ the screen says `Card error` for a moment and then `Insert SD card`, and the
 player tries the card every 2 seconds. Push the card back in and it carries
 on by itself: the library is loaded again, and if it is the same card the
 queue and the track on Now Playing are kept, so `D` resumes where it stopped.
+(If no key was used for longer than the backlight timeout, the screen is dark
+by then: the first key press only lights it, so press `D` again.)
 A different card (or one whose music has changed since its last scan) starts
 with an empty queue, as after a rescan. Settings are not affected. While the
 card is out the volume keys, `C` and Now Playing still work; the menus show
@@ -293,7 +295,8 @@ a stopped track will start from there when you press `D`.
 
 It stops at `0:00` and one second before the end. A quick tap of `4` or `6`
 still skips. It does nothing while `Can't play` or `File missing` is shown,
-during a scan, or on a track whose length the player does not know.
+during a scan, while the card is out, or on a track whose length the player
+does not know.
 
 ### Options (`#`)
 
@@ -437,7 +440,7 @@ Main menu → **Settings**. Press `5` or `6` on a row.
 |---|---|
 | `Rescan library` | Scans the whole card again. Playback stops; `Scanning...` and a count show; then the main menu. Do it after changing the music on the card. If the tracks on the card are the same as before, the queue is kept; otherwise it is emptied. |
 | `Backlight: 30 s` | How long the backlight stays on after the last key: `15 s`, `30 s` (the default), `60 s` or `on` (never goes off). Each press moves to the next value. |
-| `Sleep: off` | The sleep timer: each press moves to the next of `off`, 15, 30 and 60 minutes, counted from that moment. The row shows the minutes left (`Sleep: 27 min`). When it runs out while music plays, the volume fades out over about 10 seconds, playback stops and the backlight goes off; `D` carries on from there at your normal volume. With nothing playing it only turns the backlight off. Any key press during the fade (or pausing) stops the fade. The timer is then off again. |
+| `Sleep: off` | The sleep timer: each press moves to the next of `off`, 15, 30 and 60 minutes, counted from that moment. The row shows the minutes left (`Sleep: 27 min`). When it runs out while music plays, the volume fades out over about 10 seconds, playback stops and the backlight goes off; `D` carries on from there at your normal volume (the screen is dark, so the first press only lights it: press `D` again). With nothing playing it only turns the backlight off. Any key press during the fade (or pausing) stops the fade. The timer is then off again. |
 | `Keypad test` | Shows `Key test` with a count, and the last key and what it did (`press`, `long`, `repeat`, `release`). The triangle in the corner shows the LCD's own symbols work. Every key is shown, none acts; **hold `*`** to leave. |
 | `About` | The number of tracks; then, scrolling, the card's free space and the date the firmware was built (`Free 912 MB  Built Oct  7 2026`). Any key but `A`, `B`, `C`, `D` goes back to Settings. |
 
@@ -488,7 +491,7 @@ idf.py -p /dev/ttyUSB0 flash
 | What you see | What to do |
 |---|---|
 | `Insert SD card` | The card did not start. The player tries again every 2 seconds. Take the card out and click it back in. On a computer's USB port this happens after plug-in when the LCD is attached: re-seat the card once, or use a phone charger. Check the card is FAT32. |
-| `Card error`, then `Insert SD card`, while the player was running | The card was taken out, or stopped answering. Push it back in (or take it out and click it back in); the player finds it within 2 seconds and carries on with no reset: press `D` to resume. See [Taking the card out](#the-card). If it happens with the card in place, check the card's contacts and the power supply. |
+| `Card error`, then `Insert SD card`, while the player was running | The card was taken out, or stopped answering. Push it back in (or take it out and click it back in); the player finds it within 2 seconds and carries on with no reset: press `D` to resume (if the screen has gone dark, the first press only lights it: press `D` again). See [Taking the card out](#the-card). If it happens with the card in place, check the card's contacts and the power supply. |
 | `Can't play` (bottom row of Now Playing) | The file would not decode (damaged, not really FLAC/MP3, an unusual sample rate, or an unusual bit depth: FLAC is played at 16 or 24 bits). The player skips to the next track after 1.5 s. After three in a row it stops. |
 | `File missing` | The file has gone since the last scan. The player skips it. Run **Rescan library** after changing the card. |
 | `(missing)` in a playlist | See [Entries marked (missing)](#entries-marked-missing). |

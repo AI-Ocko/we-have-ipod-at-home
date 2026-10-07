@@ -731,14 +731,19 @@ static uint32_t us_since(int64_t start_us) {
 // NULL if there is no such file (`*exists` says which), its length alone
 // says it is no queue file (empty, or too large to be one), or it cannot be
 // read: no memory for it, or the card failed (`*unreadable` says that; what
-// it holds is then not known).
+// it holds is then not known). `exists` and `unreadable` may be NULL.
 static uint8_t *read_file(const char *path, size_t *bytes, bool *exists,
                           bool *unreadable) {
   struct stat st;
   *bytes = 0;
-  *unreadable = false;
-  *exists = (stat(path, &st) == 0);
-  if (!*exists || st.st_size <= 0 || st.st_size > (off_t)FILE_BYTES_MAX) {
+  if (unreadable != NULL) {
+    *unreadable = false;
+  }
+  bool found = (stat(path, &st) == 0);
+  if (exists != NULL) {
+    *exists = found;
+  }
+  if (!found || st.st_size <= 0 || st.st_size > (off_t)FILE_BYTES_MAX) {
     return NULL;
   }
   size_t size = (size_t)st.st_size;
@@ -754,7 +759,9 @@ static uint8_t *read_file(const char *path, size_t *bytes, bool *exists,
       storage_report_failure(); // the card failed, not the allocation
     }
     heap_caps_free(block);
-    *unreadable = true;
+    if (unreadable != NULL) {
+      *unreadable = true;
+    }
     return NULL;
   }
   *bytes = size;
@@ -766,13 +773,12 @@ static void read_found(void) {
   int64_t start = esp_timer_get_time();
   uint8_t *found[FOUND_FILES] = {NULL, NULL};
   size_t bytes[FOUND_FILES] = {0, 0};
-  bool tmp_exists = false, queue_exists = false;
-  bool tmp_unreadable = false, queue_unreadable = false;
+  bool tmp_exists = false, tmp_unreadable = false;
   if (storage_hold()) {
     found[FOUND_TMP] =
         read_file(TMP_PATH, &bytes[FOUND_TMP], &tmp_exists, &tmp_unreadable);
-    found[FOUND_QUEUE] = read_file(QUEUE_PATH, &bytes[FOUND_QUEUE],
-                                   &queue_exists, &queue_unreadable);
+    found[FOUND_QUEUE] =
+        read_file(QUEUE_PATH, &bytes[FOUND_QUEUE], NULL, NULL);
     storage_release();
   }
   ESP_LOGI(TAG, "queue file: %u bytes%s, read in %" PRIu32 " us",

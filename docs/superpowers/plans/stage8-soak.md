@@ -158,7 +158,15 @@ The least-ever free is 23039, against 22419. In run 2 it was 25491 from
 9.5 min on and fell to 23039 at 47.8 min, right after a fast-forward and
 rewind in Hey Mama: a seek resets the decoder (`dec_seek`), and the parser
 logs its frame size again and allocates its buffer anew. That is the only
-drop seen, so it is likely but not proven to be the cause. The cost: the pool is reserved
+drop seen, so it is likely but not proven to be the cause. The lowest
+reading of a `stat` in run 2 was at 3495.7 s, during Hey Mama, about 3
+minutes after a console seek and 30 s after a `pl` edit: `heap_data=27959
+heap_data_largest=20480`, 4100 bytes and one 4 KB block below the stats on
+either side (32059 / 24576), and back to 32055 / 24576 at the next one.
+`heap_data_min` stayed at 23039, so it was a short-lived allocation by
+another task that the stat happened to catch (which one was not found), not
+a leak or a new low; the largest block was still above the parser's 16 KB
+worst case. The cost: the pool is reserved
 always, so free internal RAM between tracks and during an MP3 is about 56 KB
 less than before (50 KB between tracks, 46 KB with an MP3, against 107 and
 74). With a FLAC the free total is about 5 KB less than before (the pool's
@@ -192,7 +200,8 @@ boot on `8c2c1a4` (console `play`, one after another):
 
 - **LCD I2C timeouts.** `i2c.master: I2C transaction timeout detected` and
   `lcd: LCD transfer failed (ESP_ERR_INVALID_RESPONSE); will re-initialise on
-  the next update` came 39 times in run 1 and 29 times in run 2, spread evenly
+  the next update` came 39 times in run 1; in run 2 there were 25 timeouts
+  and 29 transfer failures, spread evenly
   over the hour, with probe timeouts while the driver re-initialised. The LCD
   driver recovers by design (stage 2). Not memory, not the player; it looks
   like the breadboard I2C wiring or pull-ups. Not investigated. Whether the
