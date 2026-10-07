@@ -232,7 +232,8 @@ static void say_outcome(ui_t *ui, const playlist_event_t *ev, int64_t now_us) {
   case PLAYLIST_TASK_NO_ENTRY:
     // The playlist is not there any more (a computer or the console took
     // it), or an entry moved past an end: the listing or the load that
-    // follows shows what is there. Nothing to say.
+    // follows shows what is there. Nothing to say here (but on_edit says
+    // "Not found" for an append or a create, which nothing would show).
   case PLAYLIST_TASK_DONE:
     break;
   }
@@ -669,10 +670,13 @@ void ui_pl_row_name(const ui_t *ui, uint32_t row, char *out, size_t size) {
   }
 }
 
+// The picker or the confirmation closes. An answer said after this (the
+// request's "Busy", or the playlist task's later) is shown as usual.
 static void close_layer(ui_t *ui) {
   ui->layer = UI_LAYER_NONE;
   ui->list_dirty = true;
   ui->list_restart = true;
+  ui_overlay_end_words(ui);
 }
 
 static void picker_choose(ui_t *ui, int64_t now_us) {
@@ -1081,6 +1085,15 @@ static void on_edit(ui_t *ui, const playlist_event_t *ev, int64_t now_us) {
   case PLAYLIST_REQUEST_RENAME:
   case PLAYLIST_REQUEST_DELETE:
   case PLAYLIST_REQUEST_APPEND:
+    // An append (from the picker) to a playlist deleted meanwhile, or a
+    // create whose tracks the index no longer has: the screen shows no
+    // change that would say so, so it is said. (A rename or a delete of a
+    // playlist that has gone is shown by the listing below.)
+    if (ev->outcome == PLAYLIST_TASK_NO_ENTRY &&
+        (edit.kind == PLAYLIST_REQUEST_APPEND ||
+         edit.kind == PLAYLIST_REQUEST_CREATE)) {
+      say(ui, UI_OVERLAY_NOT_FOUND, now_us);
+    }
     // It has gone, or the folder has a name the catalog in hand did not
     // (made meanwhile, or past the 200 a catalog holds): list it again.
     if (ev->outcome == PLAYLIST_TASK_NO_ENTRY ||

@@ -150,7 +150,7 @@ static playlist_result_t edit_list(FILE *in, FILE *out,
   return r;
 }
 
-// --- Bytes in and out ---------------------------------------------------------
+// --- Bytes in and out --------------------------------------------------------
 
 #define BIG (128 * 1024)
 static unsigned char got[BIG];
@@ -194,7 +194,9 @@ static void want_add(const void *p, size_t n) {
 
 static void want_str(const char *s) { want_add(s, strlen(s)); }
 
-static void want_src(size_t from, size_t to) { want_add(src + from, to - from); }
+static void want_src(size_t from, size_t to) {
+  want_add(src + from, to - from);
+}
 
 static void assert_got_want(void) {
   TEST_ASSERT_EQUAL_size_t(want_len, got_len);
@@ -232,7 +234,7 @@ static playlist_edit_t append_edit(const uint16_t *tracks, uint32_t count) {
   return e;
 }
 
-// --- Tracks -------------------------------------------------------------------
+// --- Tracks ------------------------------------------------------------------
 
 static uint16_t track_of(const char *path) {
   uint32_t t = UINT32_MAX;
@@ -255,7 +257,7 @@ static void assert_tracks(const uint16_t *expected, uint32_t n) {
   }
 }
 
-// --- Lines --------------------------------------------------------------------
+// --- Lines -------------------------------------------------------------------
 
 static char paths[2][PLAYLIST_PATH_MAX];
 
@@ -369,7 +371,7 @@ void test_line_paths_backslashes_and_case(void) {
                "RADIOHEAD/kid a/01 EVERYTHING.FLAC", NULL);
 }
 
-// --- Reading ------------------------------------------------------------------
+// --- Reading -----------------------------------------------------------------
 
 void test_read_device_made_file(void) {
   FILE *in = fixture(FIXTURE("device.m3u"));
@@ -758,7 +760,7 @@ void test_read_lines_across_block_edges(void) {
   }
 }
 
-// --- Editing ------------------------------------------------------------------
+// --- Editing -----------------------------------------------------------------
 
 // blocks.m3u, block by block: the #EXTM3U line, the four entries' blocks and
 // the lines after the last entry.
@@ -1013,7 +1015,8 @@ void test_move_past_either_end_is_refused(void) {
       up_edit(UINT32_MAX), down_edit(UINT32_MAX),
   };
   for (size_t i = 0; i < sizeof(refused) / sizeof(refused[0]); i++) {
-    TEST_ASSERT_EQUAL(PLAYLIST_NO_ENTRY, edit_to_got(blocks_file(), &refused[i]));
+    TEST_ASSERT_EQUAL(PLAYLIST_NO_ENTRY,
+                      edit_to_got(blocks_file(), &refused[i]));
     TEST_ASSERT_EQUAL_size_t(0, got_len);
     TEST_ASSERT_EQUAL(PLAYLIST_NO_ENTRY, edit_to_got(NULL, &refused[i]));
     TEST_ASSERT_EQUAL_size_t(0, got_len);
@@ -1088,7 +1091,8 @@ static const char *const COMPUTER[] = {
     "loose/untagged song.flac" CRLF,
     "RADIOHEAD/ok computer/01 AIRBAG.MP3" CRLF,
     "#EXTINF:100,Sigur Ros - Intro" CRLF "/" UTF8_PATH CRLF,
-    "file:///e:/Sigur%20R%C3%B3s/%C3%81g%C3%A6tis%20byrjun/01%20Intro.flac" CRLF,
+    "file:///e:/Sigur%20R%C3%B3s/%C3%81g%C3%A6tis%20byrjun/"
+    "01%20Intro.flac" CRLF,
     "e:/Gone/Not Here.flac" CRLF,
     "/deep/a/b/c/d/Deep Track.flac" CRLF,
     "#EXTINF:100,Radiohead - Motion Picture Soundtrack" CRLF

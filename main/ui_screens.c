@@ -254,7 +254,10 @@ static void about_row(const ui_t *ui, char *out, size_t size) {
     if (bytes < (10ull << 30)) {
       snprintf(space, sizeof(space), "%" PRIu64 " MB", bytes >> 20);
     } else {
-      uint64_t tenths = bytes / ((1ull << 30) / 10);
+      // Exact tenths of 2^30, rounded down: (2^30 / 10) is itself rounded
+      // down, and dividing by it would round some values up a tenth. (The
+      // product overflows only past 2^60 bytes.)
+      uint64_t tenths = (bytes * 10) >> 30;
       snprintf(space, sizeof(space), "%" PRIu64 ".%u GB", tenths / 10,
                (unsigned)(tenths % 10));
     }
@@ -389,6 +392,8 @@ static const char *overlay_text(ui_overlay_t overlay) {
     return "Can't start w/ ."; // exactly the 16 columns
   case UI_OVERLAY_NAME_RESERVED:
     return "Name reserved";
+  case UI_OVERLAY_NOT_FOUND:
+    return "Not found";
   case UI_OVERLAY_VOLUME:
     break;
   }
@@ -407,6 +412,16 @@ static void render_volume_bar(int volume, screen_t *screen) {
   row[BAR_COL + BAR_CELLS] = ' ';
   row[SCREEN_COLS - 2] = volume >= 10 ? (char)('0' + volume / 10) : ' ';
   row[SCREEN_COLS - 1] = (char)('0' + volume % 10);
+}
+
+bool ui_render_needs_player(const ui_t *ui, int64_t now_us) {
+  if (ui->mode == UI_MODE_KEYTEST) {
+    return false; // drawn whole, with no overlay
+  }
+  if (ui->mode == UI_MODE_NOW_PLAYING && ui->layer == UI_LAYER_NONE) {
+    return true; // render_now_playing
+  }
+  return overlay_on(ui, now_us) && ui->overlay == UI_OVERLAY_VOLUME;
 }
 
 void ui_render(const ui_t *ui, const player_status_t *player, int64_t now_us,

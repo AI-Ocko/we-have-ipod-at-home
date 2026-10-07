@@ -43,8 +43,10 @@
 //
 // Play next and Add to queue change nothing that is playing and leave the
 // menu open: "Added" or "Queue full" is shown on the bottom row for 1.5 s
-// (the overlay). So do Move up and Move down, with the menu on the moved
-// entry. Each action takes the index once.
+// (the overlay), or until the user closes the menu, whichever is sooner (a
+// close that follows from an answer, such as a playlist that has gone,
+// leaves the answer's words up). So do Move up and Move down, with the menu
+// on the moved entry. Each action takes the index once.
 
 void ui_options_open(ui_t *ui) {
   const library_t *lib = ui_index_get(ui);
@@ -159,6 +161,7 @@ void ui_options_on_key(ui_t *ui, const key_event_t *event, int64_t now_us) {
   case '#':
     if (press) {
       ui_options_close(ui);
+      ui_overlay_end_words(ui); // "Added" was about the menu: it goes too
     }
     break;
   default:

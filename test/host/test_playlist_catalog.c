@@ -342,6 +342,26 @@ void test_name_check_each_rule(void) {
   // Both ends: the end is checked first (the order of playlist_name_t).
   assert_check(".A.", PLAYLIST_NAME_BAD_END, NULL);
 
+  // A reserved name followed by '.' and anything: Windows cannot open
+  // "CON.X.m3u" either.
+  assert_check("CON.X", PLAYLIST_NAME_RESERVED, "CON.X");
+  assert_check("NUL.M3U", PLAYLIST_NAME_RESERVED, "NUL.M3U");
+  assert_check("LPT9.A.B", PLAYLIST_NAME_RESERVED, "LPT9.A.B");
+  assert_check("COM1..X", PLAYLIST_NAME_RESERVED, "COM1..X");
+  assert_check(" AUX.1 ", PLAYLIST_NAME_RESERVED, "AUX.1"); // once trimmed
+  // Windows ignores spaces before the ending too.
+  assert_check("CON .X", PLAYLIST_NAME_RESERVED, "CON .X");
+  assert_check("PRN  .A", PLAYLIST_NAME_RESERVED, "PRN  .A");
+  // Only what comes before the first '.' counts.
+  assert_check("CONX.A", PLAYLIST_NAME_OK, "CONX.A");
+  assert_check("CO.N", PLAYLIST_NAME_OK, "CO.N");
+  assert_check("A.CON", PLAYLIST_NAME_OK, "A.CON");
+  assert_check("COM10.X", PLAYLIST_NAME_OK, "COM10.X");
+  assert_check("C ON.X", PLAYLIST_NAME_OK, "C ON.X");
+  // The rules before it still come first.
+  assert_check("CON.", PLAYLIST_NAME_BAD_END, NULL);
+  assert_check("con.x", PLAYLIST_NAME_BAD_CHAR, NULL);
+
   // Where more than one rule is broken, the first in the list above wins.
   assert_check("abcdefghijklmnopq", PLAYLIST_NAME_TOO_LONG, NULL);
   assert_check("rock.", PLAYLIST_NAME_BAD_CHAR, NULL);
@@ -386,7 +406,7 @@ void test_name_check_refuses_reserved_names(void) {
   static const char *const FINE[] = {
       "CONCERT", "CON 1", "CO N", "ICON", "PRNX", "AUX1", "NULL", "NU",
       "COM",     "COM0",  "COM10", "COM1 0", "LPT",  "LPT0", "LPT10", "XCON",
-      "CON-",    "CON'S", "1COM", "CON.X", "CO",   "LPTX",
+      "CON-",    "CON'S", "1COM", "CO",    "LPTX",
   };
   for (size_t k = 0; k < sizeof(FINE) / sizeof(FINE[0]); k++) {
     assert_check(FINE[k], PLAYLIST_NAME_OK, FINE[k]);

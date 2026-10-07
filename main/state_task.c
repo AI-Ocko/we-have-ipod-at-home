@@ -146,6 +146,10 @@
 // through a stream that reads memory. The bytes are in PSRAM (33 KB at most
 // per file, 27 ms to read; 4 ms to find that there is no file), and are
 // freed by this task once the restore has been made or can no longer be.
+// A .tmp that could not be read (no memory for it, or the card failing) is
+// left on the card for the next start, since it may be the newest queue
+// there is; only one whose bytes play_queue_restore refused, or whose
+// length alone says it is no queue file, is deleted.
 //
 // SAVING THE FILE, AND A POWER CUT AT EACH STEP
 //
@@ -202,29 +206,38 @@
 // a position say, leaves the retry alone. So a card that keeps failing
 // costs one attempt and two log lines per back-off, never a loop.
 //
-// A newer hand-over supersedes the retry: hand_over() clears s_retry, so
-// the new queue is written on its own pass as usual, and the failed copy is
-// never written. If a newer queue was already waiting when the write
-// failed, nothing is put back at all.
+// A newer hand-over supersedes the retry: hand_over() clears s_retry, and
+// the task, woken by that hand-over's notification, sees that nothing is
+// waiting to be retried and disarms its own timer (s_retry_armed). So the
+// new queue is written on its own pass as usual, after its quiet period
+// (and, if that write fails too, after a back-off doubled from the last),
+// and the failed copy is never written. If a newer queue was already
+// waiting when the write failed, nothing is put back at all.
 //
 // With no card mounted (it is mounted once, at start-up, and never taken
 // away, so this is only for a card that never came) the write stops at
 // that check and logs it, as before; the task does not set its own timer
-// then, and the copy waits for the first save pass after the back-off.
+// then, and the copy is tried again on the first save pass (a hand-over of
+// anything) after the back-off, which the log says.
 //
 // MEMORY DURING A SAVE
 //
-// The stream the file is written through has no stdio buffer (_IONBF).
-// play_queue_save makes three large writes (header, play order, original
-// order), so a buffer would only cut them into 4 KB pieces, and it would be
-// 4 KB of internal RAM (stdio allocates it at the first write, and an
-// allocation that small goes to internal RAM first) taken while a track
-// plays, which is when internal RAM is shortest. Measured, playing the
-// 305 s FLAC with a queue of 1,028 tracks: 39,003 bytes of internal data
-// RAM free, largest piece 30,720, before the save; during it, with the
-// buffer, 34,735 and 26,624; without, 38,819 and 30,720 (FatFs's FIL is in
-// PSRAM; the low-water mark fell by 1.7 KB in all, the SD driver's and
-// FatFs's short-lived pieces included). After a switch from an
+// The stream the file is written through is set unbuffered (_IONBF). Stdio
+// here is picolibc's, and ESP-IDF turns _IONBF into a buffer of one byte
+// (esp_libc's __bufio_setvbuf wrapper); a write at least as long as a
+// stream's buffer skips the buffer and goes to the file in one call, after
+// whatever the buffer holds. So each of play_queue_save's three writes
+// (header, play order, original order) reaches FatFs whole, in one call. A
+// stream left buffered gets a buffer as long as the file's st_blksize, 4 KB
+// on this card, which would only gather the smaller writes into 4 KB
+// pieces; and it is 4 KB of internal RAM (stdio allocates it at the first
+// write, and an allocation that small goes to internal RAM first) taken
+// while a track plays, which is when internal RAM is shortest. Measured,
+// playing the 305 s FLAC with a queue of 1,028 tracks: 39,003 bytes of
+// internal data RAM free, largest piece 30,720, before the save; during it,
+// with the buffer, 34,735 and 26,624; without, 38,819 and 30,720 (FatFs's
+// FIL is in PSRAM; the low-water mark fell by 1.7 KB in all, the SD
+// driver's and FatFs's short-lived pieces included). After a switch from an
 // MP3 to that FLAC the largest piece was only 14,336 bytes, so the 4 KB
 // would have been more than a quarter of it. The cost is time: a save of
 // 1,028 tracks took 51 to 73 ms instead of 40 to 53 (eight of each, the
@@ -567,7 +580,7 @@ static bool s_retry;       // because writing it failed (see A FAILED SAVE)
 static int s_claimed = -1; // the copy the task is using, or -1
 static uint8_t *s_found[FOUND_FILES];
 static size_t s_found_bytes[FOUND_FILES];
-static bool s_found_tmp;  // there was a .tmp file, usable or not
+static bool s_found_tmp;  // there was a .tmp file whose bytes were read
 static bool s_found_open; // the files have been read and not yet given up
 static tidy_t s_tidy;
 
@@ -693,18 +706,22 @@ bool state_task_restore_queue(play_queue_t *q, const library_t *lib) {
   return ok;
 }
 
-// --- The task's side: the card -------------------------------------------------
+// --- The task's side: the card -----------------------------------------------
 
 static uint32_t us_since(int64_t start_us) {
   return (uint32_t)(esp_timer_get_time() - start_us);
 }
 
 // The whole of the file at `path`, in a block of PSRAM the caller frees.
-// NULL if there is no such file (`*exists` says which), it is too large to
-// be a queue file, or it cannot be read.
-static uint8_t *read_file(const char *path, size_t *bytes, bool *exists) {
+// NULL if there is no such file (`*exists` says which), its length alone
+// says it is no queue file (empty, or too large to be one), or it cannot be
+// read: no memory for it, or the card failed (`*unreadable` says that; what
+// it holds is then not known).
+static uint8_t *read_file(const char *path, size_t *bytes, bool *exists,
+                          bool *unreadable) {
   struct stat st;
   *bytes = 0;
+  *unreadable = false;
   *exists = (stat(path, &st) == 0);
   if (!*exists || st.st_size <= 0 || st.st_size > (off_t)FILE_BYTES_MAX) {
     return NULL;
@@ -719,6 +736,7 @@ static uint8_t *read_file(const char *path, size_t *bytes, bool *exists) {
   if (got != (ssize_t)size) {
     ESP_LOGW(TAG, "could not read %s", path);
     heap_caps_free(block);
+    *unreadable = true;
     return NULL;
   }
   *bytes = size;
@@ -730,13 +748,18 @@ static void read_found(void) {
   int64_t start = esp_timer_get_time();
   uint8_t *found[FOUND_FILES];
   size_t bytes[FOUND_FILES];
-  bool tmp_exists, queue_exists;
-  found[FOUND_TMP] = read_file(TMP_PATH, &bytes[FOUND_TMP], &tmp_exists);
-  found[FOUND_QUEUE] =
-      read_file(QUEUE_PATH, &bytes[FOUND_QUEUE], &queue_exists);
+  bool tmp_exists, queue_exists, tmp_unreadable, queue_unreadable;
+  found[FOUND_TMP] =
+      read_file(TMP_PATH, &bytes[FOUND_TMP], &tmp_exists, &tmp_unreadable);
+  found[FOUND_QUEUE] = read_file(QUEUE_PATH, &bytes[FOUND_QUEUE],
+                                 &queue_exists, &queue_unreadable);
   ESP_LOGI(TAG, "queue file: %u bytes%s, read in %" PRIu32 " us",
            (unsigned)bytes[FOUND_QUEUE],
-           tmp_exists ? " (and an unfinished save)" : "", us_since(start));
+           !tmp_exists       ? ""
+           : tmp_unreadable ? " (and an unfinished save that could not be "
+                              "read: kept for the next start)"
+                            : " (and an unfinished save)",
+           us_since(start));
 
   xSemaphoreTake(s_queue_lock, portMAX_DELAY);
   bool late = s_known; // a queue has been handed over already
@@ -745,7 +768,9 @@ static void read_found(void) {
       s_found[i] = found[i];
       s_found_bytes[i] = bytes[i];
     }
-    s_found_tmp = tmp_exists;
+    // A .tmp that could not be read may be whole: it is kept (see
+    // RESTORING), and only one whose bytes were refused is discarded.
+    s_found_tmp = tmp_exists && !tmp_unreadable;
     s_found_open = true;
   }
   xSemaphoreGive(s_queue_lock);
@@ -814,8 +839,15 @@ static void back_off(void) {
   s_failing = true;
   s_failed_at = xTaskGetTickCount();
   s_retry_armed = storage_is_mounted();
-  ESP_LOGW(TAG, "the queue will be saved again in %" PRIu32 " s",
-           (uint32_t)(pdTICKS_TO_MS(s_backoff) / 1000));
+  uint32_t s = (uint32_t)(pdTICKS_TO_MS(s_backoff) / 1000);
+  if (s_retry_armed) {
+    ESP_LOGW(TAG, "the queue will be saved again in %" PRIu32 " s", s);
+  } else {
+    ESP_LOGW(TAG,
+             "the queue will be tried again with the first save after "
+             "%" PRIu32 " s",
+             s);
+  }
 }
 
 // A write succeeded, or there is nothing left to retry.
@@ -828,6 +860,15 @@ static void back_off_done(void) {
 // Whether a retry is due: the back-off since the last failure is over.
 static bool retry_due(TickType_t now) {
   return (TickType_t)(now - s_failed_at) >= s_backoff;
+}
+
+// Whether a failed copy is still waiting to be retried: false once a newer
+// hand-over has superseded it (hand_over clears s_retry).
+static bool retry_waiting(void) {
+  xSemaphoreTake(s_queue_lock, portMAX_DELAY);
+  bool waiting = s_retry;
+  xSemaphoreGive(s_queue_lock);
+  return waiting;
 }
 
 // Give the claimed copy back; `stale` if the file was not written from it.
@@ -949,7 +990,7 @@ static void save_queue(TickType_t now) {
   // one and is written on its own pass, like any hand-over.
 }
 
-// --- The task's side: the console ----------------------------------------------
+// --- The task's side: the console --------------------------------------------
 
 static state_report_t s_report; // filled by the task, copied by the caller
 static bool s_cleared;          // whether the last `state clear` did it all
@@ -1081,7 +1122,7 @@ void state_task_card_ready(void) {
   xSemaphoreTake(s_card_done, portMAX_DELAY);
 }
 
-// --- The task ------------------------------------------------------------------
+// --- The task ----------------------------------------------------------------
 
 // See ONE TASK, WOKEN BY CHANGES.
 static void state_task(void *arg) {
@@ -1120,6 +1161,11 @@ static void state_task(void *arg) {
     uint32_t request = 0;
     xTaskNotifyWait(0, UINT32_MAX, &request, wait);
     TickType_t now = xTaskGetTickCount();
+    if (s_retry_armed && !retry_waiting()) {
+      // A newer queue superseded the failed copy (see A FAILED SAVE): it
+      // waits for its quiet period like any hand-over, not for the retry.
+      s_retry_armed = false;
+    }
 
     if (request & REQUEST_SAVE) {
       if (!unsaved) {

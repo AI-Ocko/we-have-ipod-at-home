@@ -85,3 +85,9 @@ esp_err_t library_task_rescan(void);
 // See THE RULE FOR READERS.
 const library_t *library_task_get(void);
 void library_task_put(void);
+
+// Whether a load or a scan is asked for or running: true from the moment a
+// boot or a rescan claims the task until it has finished (published an
+// index or given up). Never blocks. With no index and this false, the last
+// scan failed (or there is no arena): no index is coming by itself.
+bool library_task_busy(void);

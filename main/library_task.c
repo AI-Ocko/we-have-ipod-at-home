@@ -180,6 +180,13 @@ void library_task_put(void) {
   }
 }
 
+bool library_task_busy(void) {
+  portENTER_CRITICAL(&s_lock);
+  bool busy = s_busy;
+  portEXIT_CRITICAL(&s_lock);
+  return busy;
+}
+
 // Take the index away from readers and wait until none is still using it.
 // After this the arena is the task's alone, until publish().
 static void unpublish(void) {

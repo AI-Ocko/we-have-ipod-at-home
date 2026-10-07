@@ -46,10 +46,13 @@
 //   the index while it serves a request; tracks of another index are
 //   PLAYLIST_TASK_STALE_INDEX and nothing is written. A load answers with
 //   the checksum of the index it resolved the entries against.
-// - With no index (a scan is running, or none has loaded) every request
-//   ends PLAYLIST_TASK_LIBRARY_BUSY at once, even one that needs no index:
-//   a scan keeps the card busy, and the request would otherwise wait for
-//   the scan to end.
+// - While the library is loaded or scanned every request ends
+//   PLAYLIST_TASK_LIBRARY_BUSY at once, even one that needs no index: a
+//   scan keeps the card busy, and the request would otherwise wait for the
+//   scan to end. With no index otherwise (the last scan failed) only a
+//   load, an append and a create with tracks end LIBRARY_BUSY; the rest
+//   (listing, rename, delete, remove, move, an empty create, read, free
+//   space) are served.
 // - With no card mounted every request that needs the card ends
 //   PLAYLIST_TASK_CARD_ERROR at once; nothing waits for a card, and nothing
 //   is retried by itself.

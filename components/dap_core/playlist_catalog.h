@@ -57,8 +57,9 @@ typedef enum {
 // Check a typed name and write the name to use (spaces at both ends
 // trimmed) to `out` (at least PLAYLIST_NAME_MAX + 1 bytes). The rules are
 // checked in the order of playlist_name_t and the first broken is returned;
-// RESERVED compares the whole trimmed name ("CON", not "CONCERT"). Whether
-// it is in use is playlist_catalog_find's business.
+// RESERVED compares the trimmed name up to its first '.', less spaces
+// before that '.' ("CON", "CON.X" and "CON .X", not "CONCERT" or
+// "ICON.X"). Whether it is in use is playlist_catalog_find's business.
 playlist_name_t playlist_name_check(const char *typed, char *out);
 
 // "<name>.m3u", the file a new playlist gets. Always terminated.

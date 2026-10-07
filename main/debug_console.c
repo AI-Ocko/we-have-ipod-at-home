@@ -541,11 +541,11 @@ static const char *cmd_state(char *args) {
            saved(r.has_volume, r.volume, text[0], sizeof(text[0])),
            saved(r.has_shuffle, r.shuffle, text[1], sizeof(text[1])),
            saved(r.has_loop, r.loop, text[2], sizeof(text[2])),
-           saved(r.has_backlight, r.backlight, text[6], sizeof(text[6])),
-           saved(r.has_position, r.position.position, text[3], sizeof(text[3])),
-           saved(r.has_position, r.position.track, text[4], sizeof(text[4])),
-           saved(r.has_position, r.position.elapsed_ms, text[5],
-                 sizeof(text[5])),
+           saved(r.has_backlight, r.backlight, text[3], sizeof(text[3])),
+           saved(r.has_position, r.position.position, text[4], sizeof(text[4])),
+           saved(r.has_position, r.position.track, text[5], sizeof(text[5])),
+           saved(r.has_position, r.position.elapsed_ms, text[6],
+                 sizeof(text[6])),
            (unsigned)r.stack_free);
   char index[12] = "-";
   if (r.index) {

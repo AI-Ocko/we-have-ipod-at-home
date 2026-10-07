@@ -93,14 +93,22 @@
 // not that index's is refused before anything is opened; a load resolves
 // against it and says so.
 //
-// With no index every request answers library busy, at once, even those
-// that need none (a listing, a remove, a move). No index means a scan is
-// running (or none has worked since start-up), and a scan holds the card:
-// it runs at priority 3 and goes from one card operation to the next, so a
-// request here would wait for the card until the scan ended (measured: a
-// listing asked for during a scan of 1,028 tracks took 6.07 s). Holding the
-// index for the whole request is also what keeps a scan from starting
-// half-way through one.
+// While the library is being loaded or scanned (library_task_busy) every
+// request answers library busy, at once, even those that need no index. A
+// scan holds the card: it runs at priority 3 and goes from one card
+// operation to the next, so a request here would wait for the card until
+// the scan ended (measured: a listing asked for during a scan of 1,028
+// tracks took 6.07 s). Holding the index for the whole request is also what
+// keeps a scan from starting half-way through one.
+//
+// With no index and nothing being loaded or scanned (the last scan failed:
+// no index is coming until the next), only the requests that carry track
+// numbers or turn paths into them answer library busy: a load, an append,
+// and a create with tracks. The rest need no index and are served: a
+// listing, a rename, a delete, a remove, a move, a create of an empty
+// playlist, the console's read and About's free space. A scan asked for
+// while one of those runs is not held off (there is no index to hold); it
+// shares the card with the request for that long.
 //
 // MEMORY
 //
@@ -215,10 +223,11 @@
 // so the new playlist is not lost; the request answers card error and the
 // UI reloads, which lists first. (A create and a rename tidy the folder
 // before they look for the name, so neither can write over such a .tmp or
-// take the name it is to come back under.) Rename and delete delete a leftover .tmp
-// of their playlist first (the playlist exists, so the tidying would delete
-// it anyway): renamed or deleted from under its .tmp, a whole .tmp would
-// otherwise come back under the old name at the next listing.
+// take the name it is to come back under.) Rename and delete delete a
+// leftover .tmp of their playlist first (the playlist exists, so the
+// tidying would delete it anyway): renamed or deleted from under its .tmp,
+// a whole .tmp would otherwise come back under the old name at the next
+// listing.
 //
 // A rename of a playlist is one FAT rename, with the window described for
 // step 3: a cut there leaves both names (two playlists, sharing data).
@@ -334,7 +343,7 @@ static void *s_spare[RESULT_KINDS]; // the task's alone
 static uint32_t s_int_free, s_int_largest;
 static bool s_sampled;
 
-// --- Names ---------------------------------------------------------------------
+// --- Names -------------------------------------------------------------------
 
 static inline unsigned char fold(unsigned char c) {
   return (unsigned char)(c - 'A') < 26u ? (unsigned char)(c + ('a' - 'A')) : c;
@@ -445,7 +454,7 @@ const char *playlist_task_outcome_name(playlist_outcome_t outcome) {
   return "?";
 }
 
-// --- Requests (any task) -------------------------------------------------------
+// --- Requests (any task) -----------------------------------------------------
 
 static uint32_t next_number(void) {
   uint32_t n;
@@ -581,7 +590,7 @@ uint32_t playlist_task_space(playlist_client_t client) {
   return submit(client, PLAYLIST_REQUEST_SPACE, NULL, NULL, NULL, 0, 0, 0);
 }
 
-// --- Results (any task) --------------------------------------------------------
+// --- Results (any task) ------------------------------------------------------
 
 // Take the lock and find `client`'s slot of `kind` if it answers `request`.
 // NULL (and the lock not held) if it does not.
@@ -679,7 +688,7 @@ bool playlist_task_wait(uint32_t request, playlist_event_t *out,
   }
 }
 
-// --- The task's side: results and events ---------------------------------------
+// --- The task's side: results and events -------------------------------------
 
 // The spare of `kind` now holds the result of `r`: make it the client's.
 static void publish(int kind, const request_t *r) {
@@ -722,7 +731,7 @@ static void sample_internal_ram(void) {
   s_sampled = true;
 }
 
-// --- Listing and tidying -------------------------------------------------------
+// --- Listing and tidying -----------------------------------------------------
 
 // One leftover .tmp, `name`: see SAVING for the three cases. Uses
 // s_mem->tmp_path and s_mem->new_path.
@@ -858,7 +867,7 @@ static playlist_outcome_t check_in_use(const char *name) {
   return outcome;
 }
 
-// --- Loading and reading ---------------------------------------------------------
+// --- Loading and reading -----------------------------------------------------
 
 static playlist_outcome_t do_load(const request_t *r, const library_t *lib) {
   path_of(s_mem->path, request_file(r), "");
@@ -927,7 +936,7 @@ static playlist_outcome_t do_space(const request_t *r) {
   return PLAYLIST_TASK_DONE;
 }
 
-// --- Saving ----------------------------------------------------------------------
+// --- Saving ------------------------------------------------------------------
 
 static playlist_outcome_t edit_outcome(playlist_result_t result) {
   switch (result) {
@@ -977,6 +986,18 @@ static playlist_outcome_t save(bool create, const library_t *lib,
   long size = ftell(out);
   if (in != NULL) {
     fclose(in);
+  }
+  if (result != PLAYLIST_OK || size < 0) {
+    // Emptied before the close, which writes the length it then has: if
+    // the unlink below fails too, the .tmp left has length 0, which the
+    // tidying deletes, and not the length of what was written before the
+    // failure, which it would take for a whole playlist (see SAVING).
+    // Flushed first, so that nothing the stream still holds is written
+    // after it.
+    fflush(out);
+    if (ftruncate(fileno(out), 0) != 0) {
+      ESP_LOGW(TAG, "could not empty %s (%s)", tmp, strerror(errno));
+    }
   }
   // The close writes the file's length and its last data to the card, so
   // it can fail when the writes did not.
@@ -1136,7 +1157,15 @@ static playlist_outcome_t do_delete(const request_t *r) {
   return PLAYLIST_TASK_DONE;
 }
 
-// --- The task ----------------------------------------------------------------------
+// --- The task ----------------------------------------------------------------
+
+// Whether `r` carries track numbers or turns paths into them, and so
+// cannot be served without an index (see THE INDEX).
+static bool needs_index(const request_t *r) {
+  return r->kind == PLAYLIST_REQUEST_LOAD ||
+         r->kind == PLAYLIST_REQUEST_APPEND ||
+         (r->kind == PLAYLIST_REQUEST_CREATE && r->count > 0);
+}
 
 static playlist_outcome_t serve(const request_t *r,
                                 playlist_name_t *name_result) {
@@ -1158,7 +1187,7 @@ static playlist_outcome_t serve(const request_t *r,
   }
   // Held for the whole request: see THE INDEX.
   const library_t *lib = library_task_get();
-  if (lib == NULL) {
+  if (lib == NULL && (library_task_busy() || needs_index(r))) {
     return PLAYLIST_TASK_LIBRARY_BUSY;
   }
   playlist_outcome_t outcome = PLAYLIST_TASK_NO_ENTRY;
@@ -1191,7 +1220,9 @@ static playlist_outcome_t serve(const request_t *r,
     outcome = do_space(r);
     break;
   }
-  library_task_put();
+  if (lib != NULL) {
+    library_task_put();
+  }
   return outcome;
 }
 

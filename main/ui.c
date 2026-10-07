@@ -122,12 +122,16 @@
 // layers included, until overlay_until_us: the volume bar, or the words that
 // confirm a key ("Shuffle on", "Loop all", "Added", "Queue full") or give a
 // playlist request's answer ("Saved", "Name in use", "Busy", ...); the
-// newest replaces the one before. A notice ("Can't play", "File missing")
-// replaces Now Playing's bottom row until play.notice_until_us, and when it
-// goes the next track is started; the overlay is drawn over it. Each is a
-// time in ui_t: ui_render compares it with the clock, and ui_next_change_ms
-// makes it one of the moments the loop sleeps until, along with the
-// marquee's next step. There is one sleep and no timer.
+// newest replaces the one before. Words (not the volume bar) go early when
+// the user closes the options menu, the picker or the confirmation, and
+// when Now Playing gives way to the menus or the menus to Now Playing: they
+// were about what has gone (ui_overlay_end_words). A notice ("Can't play",
+// "File missing") replaces Now Playing's bottom row until
+// play.notice_until_us, and when it goes the next track is started; the
+// overlay is drawn over it. Each is a time in ui_t: ui_render compares it
+// with the clock, and ui_next_change_ms makes it one of the moments the
+// loop sleeps until, along with the marquee's next step. There is one sleep
+// and no timer.
 //
 // KEYS
 //
@@ -405,15 +409,27 @@ static void ui_backlight_sync(ui_t *ui) {
            err == ESP_OK ? "" : " (not sent to the LCD)");
 }
 
+// Whether a track is playing (ui_playing), asking the player. That costs
+// about 0.7 ms (player_get_status measures the audio tasks' stacks), so the
+// standby code asks only when the answer decides something.
+static bool ui_playing_now(const ui_t *ui) {
+  player_status_t status;
+  player_get_status(&status);
+  return ui_playing(ui, &status);
+}
+
 // Step 2 of a pass: whatever time has come for the backlight, the timer and
 // the fade.
-static void ui_standby_on_time(ui_t *ui, const player_status_t *status,
-                               int64_t now_ms) {
+static void ui_standby_on_time(ui_t *ui, int64_t now_ms) {
   if (ui->volume_back && now_ms >= ui->volume_back_ms) {
     ui_volume_back(ui);
   }
   bool timer_on = ui->standby.sleep_at_ms != INT64_MAX;
-  uint32_t acts = standby_tick(&ui->standby, ui_playing(ui, status), now_ms);
+  // standby_tick reads `playing` only when the timer has run out and no
+  // fade is running: that is a fade beginning, or the backlight going off.
+  bool playing = !ui_fading(ui) && timer_on &&
+                 now_ms >= ui->standby.sleep_at_ms && ui_playing_now(ui);
+  uint32_t acts = standby_tick(&ui->standby, playing, now_ms);
   if (acts & STANDBY_ACT_FADE) {
     ESP_LOGI(TAG, "SLEEP timer ran out: fading over %d ms", STANDBY_FADE_MS);
   } else if (timer_on && ui->standby.sleep_at_ms == INT64_MAX &&
@@ -444,9 +460,10 @@ static void ui_standby_on_time(ui_t *ui, const player_status_t *status,
 // After a pass's events: a fade with nothing playing is over, and a volume
 // that is to go back is given its time.
 static void ui_standby_after_events(ui_t *ui, int64_t now_ms) {
-  player_status_t status;
-  player_get_status(&status);
-  bool playing = ui_playing(ui, &status);
+  if (!ui_fading(ui) && !ui->volume_back) {
+    return; // nothing below depends on whether a track is playing
+  }
+  bool playing = ui_playing_now(ui);
   if (ui_fading(ui) && !playing) {
     standby_set_sleep(&ui->standby, STANDBY_SLEEP_OFF, now_ms);
     ui_fade_cancelled(ui, "playback paused or stopped");
@@ -618,11 +635,17 @@ static void ui_jump(ui_t *ui, int direction) {
 }
 
 void ui_show_now_playing(ui_t *ui, int64_t now_us) {
+  if (ui->mode != UI_MODE_NOW_PLAYING) {
+    ui_overlay_end_words(ui); // said on the screen that is going (OVERLAYS)
+  }
   ui->mode = UI_MODE_NOW_PLAYING;
   ui->play.title_since_us = now_us; // the title is read from its beginning
 }
 
 static void ui_show_menus(ui_t *ui) {
+  if (ui->mode != UI_MODE_MENU) {
+    ui_overlay_end_words(ui);
+  }
   ui->mode = UI_MODE_MENU;
   ui->list_dirty = true;
   ui->list_restart = true;
@@ -753,12 +776,14 @@ void ui_close_layer(ui_t *ui) {
     break;
   case UI_LAYER_OPTIONS:
     ui_options_close(ui);
+    ui_overlay_end_words(ui);
     break;
   case UI_LAYER_PICKER:
   case UI_LAYER_CONFIRM:
     ui->layer = UI_LAYER_NONE;
     ui->list_dirty = true;
     ui->list_restart = true;
+    ui_overlay_end_words(ui);
     break;
   case UI_LAYER_NONE:
     break;
@@ -1145,16 +1170,20 @@ static void ui_task(void *arg) {
     atomic_fetch_add(&s_passes, 1);
     int64_t now_us = esp_timer_get_time();
     int64_t now_ms = now_us / 1000;
-    player_status_t player;
-    player_get_status(&player);
-    ui_standby_on_time(&ui, &player, now_ms);
+    ui_standby_on_time(&ui, now_ms);
     ui_play_on_time(&ui, now_us);
     ui_text_on_time(&ui, now_us);
     ui_settings_view(&ui, now_ms);
     if (ui.list_dirty && ui_list_on_show(&ui)) {
       ui_fill_list(&ui, now_us);
     }
-    player_get_status(&player); // after whatever the times above did
+    // After whatever the times above did, and only if the screen shows any
+    // of it: it costs about 0.7 ms (ui_playing_now), which a held key in a
+    // list would otherwise pay on every pass.
+    player_status_t player = {0};
+    if (ui_render_needs_player(&ui, now_us)) {
+      player_get_status(&player);
+    }
     screen_t wanted;
     ui_render(&ui, &player, now_us, &wanted);
     // Most events change nothing that is on the screen (a key release, a

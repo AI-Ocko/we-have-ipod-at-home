@@ -219,7 +219,7 @@ static char upper(char ch) {
 }
 
 // CON, PRN, AUX, NUL, COM1-COM9 or LPT1-LPT9, ignoring ASCII case: the whole
-// name, so "CONCERT" and "COM10" are not.
+// of `len`, so "CONCERT" and "COM10" are not.
 static bool is_reserved(const char *name, size_t len) {
   static const char THREE[][4] = {"CON", "PRN", "AUX", "NUL"};
   static const char FOUR[][4] = {"COM", "LPT"};
@@ -293,8 +293,20 @@ playlist_name_t playlist_name_check(const char *typed, char *out) {
     return PLAYLIST_NAME_BAD_START;
   }
   // Windows keeps these names for devices, so a computer could not open
-  // the file the card holds.
-  if (is_reserved(out, len)) {
+  // the file the card holds. It keeps them with any ending as well
+  // ("CON.X.m3u" cannot be opened either), and ignores spaces before the
+  // ending ("CON .X"), so what comes before the first '.', less spaces at
+  // its end, is what is compared.
+  const char *dot = memchr(out, '.', len);
+  if (dot != NULL) {
+    size_t base = (size_t)(dot - out);
+    while (base > 0 && out[base - 1] == ' ') {
+      base--;
+    }
+    if (is_reserved(out, base)) {
+      return PLAYLIST_NAME_RESERVED;
+    }
+  } else if (is_reserved(out, len)) {
     return PLAYLIST_NAME_RESERVED;
   }
   return PLAYLIST_NAME_OK;

@@ -108,17 +108,17 @@
 //     loaded_index=<8 hex digits> match=<yes|no> usable=<yes|no>
 //     unfinished=<yes|no>                             (all on one line)
 //
-// A value that is not saved is printed as `-`. `backlight` is 0 for 15 s,
-// 1 for 30 s, 2 for 60 s and 3 for always on (standby.h). `position` is the place in
+// A value that is not saved is printed as `-`. `backlight` is 0 for 15 s, 1 for
+// 30 s, 2 for 60 s and 3 for always on (standby.h). `position` is the place in
 // the queue, `track` the track number that was there, `elapsed_ms` the time
-// into it; `stack_free` is how much of the state task's stack has never
-// been used. `count` and `index` are what the queue file's header says: how
-// many tracks, and the checksum of the library index they belong to;
-// `loaded_index` is the checksum of the index now loaded (`-` if none), and
-// `match` whether the two are the same. `usable` is the real test: whether
-// the file is whole and would be restored with the loaded index. `unfinished`
-// says that the file of an interrupted save (queue.bin.tmp) is there too.
-// With no queue file the second line is
+// into it; `stack_free` is how much of the state task's stack has never been
+// used. `count` and `index` are what the queue file's header says: how many
+// tracks, and the checksum of the library index they belong to; `loaded_index`
+// is the checksum of the index now loaded (`-` if none), and `match` whether
+// the two are the same. `usable` is the real test: whether the file is whole
+// and would be restored with the loaded index. `unfinished` says that the file
+// of an interrupted save (queue.bin.tmp) is there too. With no queue file the
+// second line is
 //
 //   state queue_file=absent loaded_index=<...> unfinished=<yes|no>
 //

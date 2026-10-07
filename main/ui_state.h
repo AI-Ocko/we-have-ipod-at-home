@@ -107,6 +107,8 @@ typedef enum {
   UI_OVERLAY_BAD_END,
   UI_OVERLAY_BAD_START,
   UI_OVERLAY_NAME_RESERVED, // a name Windows keeps for a device (CON, ...)
+  UI_OVERLAY_NOT_FOUND,     // an append's playlist (or a create's tracks)
+                            // gone meanwhile
 } ui_overlay_t;
 
 // The track that is playing, or the last one that was. ui_play.c changes
@@ -121,7 +123,12 @@ typedef struct {
   uint32_t play_id; // the `play` that is this track's: its events count
   uint32_t min_id;  // events with a lower number are old news
   bool active;      // that play has not ended, failed or been stopped
-  bool started;     // its STARTED has come: the player's position is its
+  bool started;     // its STARTED has come: the player's position is
+                    // this track's
+  // A stop the player refused (its command queue full) after it refused
+  // this track's `play`: sent again with the next event of the track it
+  // is still playing (ui_play.c, A PLAY THE PLAYER REFUSES).
+  bool stop_owed;
 
   // The track before, while its last events may still arrive: for the log.
   char prev_path[UI_PATH_MAX];
@@ -348,6 +355,15 @@ static inline void ui_overlay_show(ui_t *ui, ui_overlay_t what,
   ui->overlay_until_us = now_us + UI_OVERLAY_MS * 1000;
 }
 
+// A confirmation's words (any overlay but the volume bar) go at once: their
+// layer has closed, or the screen they were said on has given way to
+// another (ui.c, OVERLAYS). The volume bar stays its 1.5 s.
+static inline void ui_overlay_end_words(ui_t *ui) {
+  if (ui->overlay != UI_OVERLAY_VOLUME) {
+    ui->overlay_until_us = 0;
+  }
+}
+
 // --- ui.c --------------------------------------------------------------------
 
 // The index, if there is one and it is the one the UI's numbers belong to;
@@ -531,6 +547,12 @@ void ui_screens_define_glyphs(void);
 // function of its arguments; it reads no index, no file and no clock.
 void ui_render(const ui_t *ui, const player_status_t *player, int64_t now_us,
                screen_t *screen);
+
+// Whether ui_render, at `now_us`, reads the player's status: Now Playing
+// with no layer over it (the play or pause symbol), or the volume bar. When
+// it does not, the caller need not ask the player (player_get_status costs
+// about 0.7 ms) and may pass a zeroed status.
+bool ui_render_needs_player(const ui_t *ui, int64_t now_us);
 
 // How many milliseconds after `now_us` the screen will next change with no
 // event at all (a marquee step, an overlay running out), or UINT32_MAX if it

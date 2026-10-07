@@ -86,6 +86,23 @@
 // an unchanged card), and the queue stays. Any other empties the queue, and
 // the track that was remembered from it is forgotten.
 //
+// A PLAY THE PLAYER REFUSES
+//
+// player_play fails when the player's command queue is full (eight
+// commands waiting: the decoder task stuck on the card) or there is no
+// memory for the path. Nothing will come of that play: Now Playing shows
+// the new track stopped, and D starts it. The track the player had goes on
+// playing unless it is stopped too, so a player_stop goes with the refusal.
+// With the queue full that is refused as well; it is then owed
+// (play.stop_owed) and sent again with each event of the old track that
+// arrives (old news by then) until the player takes it: nothing is polled,
+// and the old track's events are what shows that it still plays. A new
+// play that the player takes, a console track the UI follows, or a stop
+// that is taken settles what was owed. Two cases are left as they are: a
+// paused old track posts no events, so it stays loaded, paused and silent,
+// until the next play replaces it; and a console `play` taken while a stop
+// is owed may be stopped by it, if an old event arrives before its own.
+//
 // A TRACK THAT WILL NOT PLAY
 //
 // An ERROR for the current track puts a notice on Now Playing's bottom row
@@ -386,12 +403,17 @@ static void start(ui_t *ui, uint32_t start_ms) {
     play->play_id = id;
     play->min_id = id;
     play->active = true;
+    play->stop_owed = false; // the new play replaces whatever was playing
   } else {
-    // The player's command queue is full, or there is no memory for the
-    // path. Nothing will come of it: the track is stopped, not playing.
+    // See A PLAY THE PLAYER REFUSES.
     ESP_LOGW(PLAYER_TAG, "the player did not take %s", play->path);
     play->active = false;
     play->min_id = play->play_id + 1;
+    play->stop_owed = (player_stop() != ESP_OK);
+    if (play->stop_owed) {
+      ESP_LOGW(PLAYER_TAG, "the player did not take the stop either: it is "
+                           "sent again with its next event");
+    }
   }
   // The place in the queue and the time, not the queue: it holds what it
   // held.
@@ -496,7 +518,9 @@ bool ui_play_add(ui_t *ui, const library_t *lib, const browse_target_t *target,
 static void stop_player(ui_t *ui) {
   // After any `play` of ours in the player's queue, so that a track started
   // a moment ago (the one before it having just ended) is stopped too.
-  player_stop();
+  if (player_stop() == ESP_OK) {
+    ui->play.stop_owed = false;
+  }
   ui->play.min_id = ui->play.play_id + 1;
 }
 
@@ -768,6 +792,7 @@ static void adopt(ui_t *ui, uint32_t play_id, int64_t now_us) {
   play->play_id = play_id;
   play->min_id = play_id;
   play->active = true;
+  play->stop_owed = false; // the console's track is the one to follow now
   play->from_queue = false;
   play->notice_until_us = 0;
   // Its title and artist, if it is in the index.
@@ -789,6 +814,11 @@ void ui_play_on_event(ui_t *ui, const player_event_t *event, int64_t now_us) {
   // See WHICH EVENTS COUNT. An old event is logged like any other, so that
   // the log shows everything the player did, and that is all.
   bool old = event->play_id < play->min_id;
+  if (old && play->stop_owed && player_stop() == ESP_OK) {
+    // A PLAY THE PLAYER REFUSES: the track it plays on is stopped now.
+    play->stop_owed = false;
+    ESP_LOGI(PLAYER_TAG, "the stop owed since a refused play was taken");
+  }
   if (!old && event->play_id != play->play_id) {
     adopt(ui, event->play_id, now_us);
   }
