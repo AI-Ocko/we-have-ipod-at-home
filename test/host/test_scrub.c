@@ -77,12 +77,15 @@ void test_forward_stops_before_the_end(void) {
   repeat(SCRUB_FAST_AFTER_MS, 9000);
   TEST_ASSERT_EQUAL_UINT32(9000, scrub_finish(&s));
   // Started inside the last second (or past a length that was a guess):
-  // the target is one second before the end.
+  // a forward scrub is not pulled back; it stays where it started.
   start(+1, 9800, 10000);
-  TEST_ASSERT_EQUAL_UINT32(9000, s.target_ms);
+  TEST_ASSERT_EQUAL_UINT32(9800, s.target_ms);
+  repeat(150, 9800);
+  TEST_ASSERT_EQUAL_UINT32(9800, scrub_finish(&s));
   start(+1, 20000, 10000);
-  TEST_ASSERT_EQUAL_UINT32(9000, s.target_ms);
-  // And rewinding from there goes back from that point.
+  TEST_ASSERT_EQUAL_UINT32(20000, s.target_ms);
+  repeat(SCRUB_FAST_AFTER_MS, 20000);
+  // Rewinding from past the limit goes back from the limit.
   start(-1, 20000, 10000);
   repeat(150, 7000);
   // The longest length there is.
@@ -94,11 +97,15 @@ void test_track_shorter_than_the_margin(void) {
   static const uint32_t LENGTHS[] = {1, 100, SCRUB_END_MARGIN_MS - 1,
                                      SCRUB_END_MARGIN_MS};
   for (size_t i = 0; i < sizeof(LENGTHS) / sizeof(LENGTHS[0]); i++) {
-    start(+1, 50, LENGTHS[i]);
+    start(+1, 0, LENGTHS[i]);
     TEST_ASSERT_EQUAL_UINT32(0, s.target_ms);
     repeat(150, 0);
     repeat(SCRUB_FAST_AFTER_MS, 0);
     TEST_ASSERT_EQUAL_UINT32(0, scrub_finish(&s));
+    // Forward from inside it: it stays where it was.
+    start(+1, 50, LENGTHS[i]);
+    repeat(150, 50);
+    TEST_ASSERT_EQUAL_UINT32(50, scrub_finish(&s));
     start(-1, 50, LENGTHS[i]);
     repeat(150, 0);
   }
@@ -142,6 +149,53 @@ void test_finish_returns_the_target_and_ends_the_scrub(void) {
   TEST_ASSERT_EQUAL_UINT32(2000, s.target_ms);
 }
 
+// Whatever the start and the length, every repeat of a forward scrub leaves
+// the target at or above where playback was and never lower than before.
+void test_forward_never_moves_the_target_back(void) {
+  static const uint32_t LENGTHS[] = {0, 1, 500, 1000, 1500, 10000, 300000};
+  static const uint32_t STARTS[] = {0,    50,   499,   999,   8500,   9000,
+                                    9001, 9999, 10000, 20000, 299500, 400000};
+  for (size_t l = 0; l < sizeof(LENGTHS) / sizeof(LENGTHS[0]); l++) {
+    for (size_t e = 0; e < sizeof(STARTS) / sizeof(STARTS[0]); e++) {
+      start(+1, STARTS[e], LENGTHS[l]);
+      TEST_ASSERT_EQUAL_UINT32(STARTS[e], s.target_ms);
+      uint32_t before = s.target_ms;
+      for (int64_t t = 150; t < 3000; t += 150) {
+        scrub_repeat(&s, L + t);
+        TEST_ASSERT_TRUE(s.target_ms >= before);
+        TEST_ASSERT_TRUE(s.target_ms >= STARTS[e]);
+        // It moves only up to the limit, never past it.
+        if (LENGTHS[l] != 0 && s.target_ms > before) {
+          TEST_ASSERT_TRUE(s.target_ms + SCRUB_END_MARGIN_MS <= LENGTHS[l]);
+        }
+        before = s.target_ms;
+      }
+      TEST_ASSERT_TRUE(scrub_finish(&s) >= STARTS[e]);
+    }
+  }
+}
+
+// The same for a rewind: never above where playback was, never higher than
+// before.
+void test_rewind_never_moves_the_target_forward(void) {
+  static const uint32_t LENGTHS[] = {0, 1, 500, 1000, 1500, 10000, 300000};
+  static const uint32_t STARTS[] = {0,    50,   499,   999,   8500,   9000,
+                                    9001, 9999, 10000, 20000, 299500, 400000};
+  for (size_t l = 0; l < sizeof(LENGTHS) / sizeof(LENGTHS[0]); l++) {
+    for (size_t e = 0; e < sizeof(STARTS) / sizeof(STARTS[0]); e++) {
+      start(-1, STARTS[e], LENGTHS[l]);
+      TEST_ASSERT_TRUE(s.target_ms <= STARTS[e]);
+      uint32_t before = s.target_ms;
+      for (int64_t t = 150; t < 3000; t += 150) {
+        scrub_repeat(&s, L + t);
+        TEST_ASSERT_TRUE(s.target_ms <= before);
+        before = s.target_ms;
+      }
+      TEST_ASSERT_TRUE(scrub_finish(&s) <= STARTS[e]);
+    }
+  }
+}
+
 int main(void) {
   UNITY_BEGIN();
   RUN_TEST(test_forward_two_seconds_per_repeat_then_five);
@@ -150,5 +204,7 @@ int main(void) {
   RUN_TEST(test_track_shorter_than_the_margin);
   RUN_TEST(test_unknown_length_has_no_end_limit);
   RUN_TEST(test_finish_returns_the_target_and_ends_the_scrub);
+  RUN_TEST(test_forward_never_moves_the_target_back);
+  RUN_TEST(test_rewind_never_moves_the_target_forward);
   return UNITY_END();
 }

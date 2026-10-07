@@ -2,11 +2,15 @@
 
 // Design notes
 //
-// The target is kept between 0 and the limit at every step, the start
-// included: a target is always somewhere playback may jump to. The limit is
-// SCRUB_END_MARGIN_MS before the end when the length is known (0 for a
-// track shorter than that), and the largest time the type holds when it is
-// not. Sums are made in 64 bits, so nothing wraps.
+// The target stops at 0 and at the limit: it does not move past them, but
+// it is never pulled back by them either. A forward scrub never moves the
+// target below where playback was, so one started in the last second (or
+// past a length that was only an estimate) stays where it started; a rewind
+// never moves it above where playback was, and one started past the limit
+// begins from the limit. The limit is SCRUB_END_MARGIN_MS before the end
+// when the length is known (0 for a track shorter than that), and the
+// largest time the type holds when it is not. Sums are made in 64 bits, so
+// nothing wraps.
 //
 // The step is chosen by how long ago the long press came, not by counting
 // repeats: the keypad's repeat interval changes while the key is held, and
@@ -32,7 +36,7 @@ void scrub_start(scrub_t *s, int direction, uint32_t elapsed_ms,
   s->direction = direction >= 0 ? +1 : -1;
   s->duration_ms = duration_ms;
   s->since_ms = now_ms;
-  s->target_ms = clamp(s, elapsed_ms);
+  s->target_ms = s->direction > 0 ? elapsed_ms : clamp(s, elapsed_ms);
 }
 
 void scrub_repeat(scrub_t *s, int64_t now_ms) {
@@ -43,7 +47,9 @@ void scrub_repeat(scrub_t *s, int64_t now_ms) {
               now_ms >= s->since_ms + SCRUB_FAST_AFTER_MS;
   uint32_t step = fast ? SCRUB_FAST_STEP_MS : SCRUB_STEP_MS;
   if (s->direction > 0) {
-    s->target_ms = clamp(s, (uint64_t)s->target_ms + step);
+    if (s->target_ms < limit_of(s)) { // at or past the limit it stays
+      s->target_ms = clamp(s, (uint64_t)s->target_ms + step);
+    }
   } else {
     s->target_ms = s->target_ms > step ? s->target_ms - step : 0;
   }

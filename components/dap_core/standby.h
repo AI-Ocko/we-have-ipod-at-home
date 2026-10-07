@@ -48,7 +48,10 @@ bool standby_key(standby_t *s, char key, key_event_type_t type,
 void standby_set_backlight(standby_t *s, standby_backlight_t backlight,
                            int64_t now_ms);
 
-// Choose a value; anything but OFF counts from now.
+// Choose a value; anything but OFF counts from now. It also ends a fade in
+// progress (standby_fade_level then gives the volume setting again): the UI
+// calls it with STANDBY_SLEEP_OFF when playback is paused, stopped or runs
+// out during the fade.
 void standby_set_sleep(standby_t *s, standby_sleep_t sleep, int64_t now_ms);
 
 // The value after the one last chosen, for the Settings row: off, 15, 30,

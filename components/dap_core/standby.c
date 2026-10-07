@@ -24,7 +24,8 @@
 // fade is running; at most one of them is set. When the timer runs out it
 // goes off: `sleep` is then STANDBY_SLEEP_OFF too ("it then resets to off",
 // spec section 9), so the Settings row and the next value agree with what
-// the user sees. The same when a key cancels the fade.
+// the user sees. The same when a key cancels the fade, or the caller does
+// with standby_set_sleep (OFF when playback is paused, stopped or runs out).
 //
 // THE FADE
 //
@@ -148,8 +149,10 @@ uint32_t standby_sleep_minutes(const standby_t *s, int64_t now_ms) {
 uint32_t standby_tick(standby_t *s, bool playing, int64_t now_ms) {
   uint32_t acts = 0;
   if (fading(s)) {
-    // Over at its end, or as soon as there is nothing left to fade.
-    if (now_ms >= fade_end(s) || !playing) {
+    // Over only at its end (or when cancelled: a key press, or
+    // standby_set_sleep). `playing` decides nothing here: a gap between two
+    // tracks must not cut it short.
+    if (now_ms >= fade_end(s)) {
       timer_off(s);
       s->lit = false;
       return STANDBY_ACT_STOP;

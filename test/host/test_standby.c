@@ -289,12 +289,16 @@ void test_expiry_while_playing_fades_then_stops(void) {
                            standby_tick(&s, true, e + STANDBY_FADE_MS));
   TEST_ASSERT_FALSE(s.lit);
 
-  // Playback ends during the fade (the queue ran out): the fade is over at
-  // once, and the stop puts the volume back.
+  // A tick that sees nothing playing during the fade (a gap between two
+  // tracks) does not cut it short: it ends only at its end.
   f = start_fade();
-  TEST_ASSERT_EQUAL_UINT32(STANDBY_ACT_STOP, standby_tick(&s, false, f + 3000));
-  TEST_ASSERT_EQUAL_INT(10, standby_fade_level(&s, 10, f + 3000));
-  TEST_ASSERT_EQUAL_INT64(INT64_MAX, s.sleep_at_ms);
+  TEST_ASSERT_EQUAL_UINT32(0, standby_tick(&s, false, f + 3000));
+  TEST_ASSERT_EQUAL_INT64(f, s.fade_from_ms);
+  TEST_ASSERT_EQUAL_INT(7, standby_fade_level(&s, 10, f + 3000));
+  TEST_ASSERT_EQUAL_INT64(f + 4000, standby_deadline(&s, 10, f + 3000));
+  TEST_ASSERT_EQUAL_UINT32(0, standby_tick(&s, false, f + STANDBY_FADE_MS - 1));
+  TEST_ASSERT_EQUAL_UINT32(STANDBY_ACT_STOP,
+                           standby_tick(&s, false, f + STANDBY_FADE_MS));
 }
 
 void test_expiry_with_nothing_playing_only_turns_the_light_off(void) {
@@ -383,6 +387,32 @@ void test_a_key_during_the_fade_cancels_it(void) {
   TEST_ASSERT_TRUE(standby_key(&s, '8', KEY_REPEAT, f + 100));
   TEST_ASSERT_TRUE(standby_key(&s, '8', KEY_RELEASE, f + 200));
   TEST_ASSERT_EQUAL_INT64(f, s.fade_from_ms);
+}
+
+// The UI ends the fade itself when playback is paused, stopped or runs out:
+// choosing off ends it, and the volume setting is back.
+void test_choosing_off_ends_a_fade(void) {
+  int64_t f = start_fade();
+  standby_set_sleep(&s, STANDBY_SLEEP_OFF, f + 4000);
+  TEST_ASSERT_EQUAL_INT64(INT64_MAX, s.fade_from_ms);
+  TEST_ASSERT_EQUAL_INT64(INT64_MAX, s.sleep_at_ms);
+  TEST_ASSERT_EQUAL_INT(STANDBY_SLEEP_OFF, s.sleep);
+  TEST_ASSERT_EQUAL_INT(10, standby_fade_level(&s, 10, f + 4000));
+  TEST_ASSERT_EQUAL_INT(20, standby_fade_level(&s, 20, f + 9999));
+  TEST_ASSERT_EQUAL_INT64(INT64_MAX, standby_deadline(&s, 10, f + 4000));
+  // No stop follows, and the light is left as it was.
+  TEST_ASSERT_EQUAL_UINT32(0, standby_tick(&s, true, f + STANDBY_FADE_MS));
+  TEST_ASSERT_EQUAL_UINT32(0, standby_tick(&s, false, f + 100 * MINUTE));
+  TEST_ASSERT_TRUE(s.lit);
+  // Choosing a value during a fade also ends it, and counts from now.
+  f = start_fade();
+  standby_set_sleep(&s, STANDBY_SLEEP_30, f + 1000);
+  TEST_ASSERT_EQUAL_INT64(INT64_MAX, s.fade_from_ms);
+  TEST_ASSERT_EQUAL_INT(10, standby_fade_level(&s, 10, f + 1000));
+  TEST_ASSERT_EQUAL_INT64(f + 1000 + 30 * MINUTE, s.sleep_at_ms);
+  // `playing` still decides fade or light-off at expiry.
+  TEST_ASSERT_EQUAL_UINT32(STANDBY_ACT_LIGHT_OFF,
+                           standby_tick(&s, false, f + 1000 + 30 * MINUTE));
 }
 
 void test_timer_is_off_after_it_expires(void) {
@@ -536,6 +566,7 @@ int main(void) {
   RUN_TEST(test_expiry_with_nothing_playing_only_turns_the_light_off);
   RUN_TEST(test_fade_level_is_a_straight_line_to_zero);
   RUN_TEST(test_a_key_during_the_fade_cancels_it);
+  RUN_TEST(test_choosing_off_ends_a_fade);
   RUN_TEST(test_timer_is_off_after_it_expires);
   RUN_TEST(test_deadline_wakes_for_each_fade_step_and_each_timeout);
   RUN_TEST(test_changing_the_backlight_setting_counts_from_now);
