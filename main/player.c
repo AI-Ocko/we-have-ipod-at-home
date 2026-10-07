@@ -284,6 +284,7 @@
 #include "multi_heap.h"
 #include "pcm.h"
 #include "player_status.h"
+#include "storage.h"
 #include <errno.h>
 #include <stdatomic.h>
 #include <stdbool.h>
@@ -398,6 +399,7 @@ static atomic_uint s_play_counter;
 static atomic_uint s_pause_wanted;
 
 // Writer: decoder task.
+static bool s_card_held; // the decoder task holds the card (dec_open)
 static atomic_uint s_loaded;         // a track is loaded (playing or paused)
 static atomic_uint s_rate;           // of the current track; 0 until known
 static atomic_uint s_ring_tracked;   // the ring has been full once this track
@@ -1071,6 +1073,11 @@ static void dec_close_source(void) {
     fclose(d->file);
     d->file = NULL;
   }
+  if (s_card_held) {
+    // The file is closed: the card may be unmounted (storage.h).
+    s_card_held = false;
+    storage_release();
+  }
   dec_stop_decoding();
 }
 
@@ -1340,9 +1347,20 @@ static int dec_open(const char *path) {
     return PLAYER_ERROR_UNSUPPORTED;
   }
 
+  // The card is held for as long as the file is open, from here to the
+  // fclose in dec_close_source, so that it is never unmounted under an
+  // open, a read or a seek (storage.h). With the card gone (or going) the
+  // track cannot be played: a read error, as the card would give.
+  if (!storage_hold()) {
+    return PLAYER_ERROR_IO;
+  }
+  s_card_held = true;
   d->file = fopen(path, "rb");
   if (!d->file) {
-    return errno == ENOENT ? PLAYER_ERROR_NOT_FOUND : PLAYER_ERROR_IO;
+    int error = errno == ENOENT ? PLAYER_ERROR_NOT_FOUND : PLAYER_ERROR_IO;
+    s_card_held = false;
+    storage_release();
+    return error;
   }
 
   // The size says which read carries the last bytes of the audio: the decoder

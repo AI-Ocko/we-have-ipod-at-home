@@ -10,7 +10,6 @@
 #include "library_task.h"
 #include "pins.h"
 #include "player.h"
-#include "player_status.h"
 #include "playlist_task.h"
 #include "state_task.h"
 #include "storage.h"
@@ -108,29 +107,27 @@ static void mount_card(bool waiting) {
 }
 
 // The card has gone: wait until nothing is using it, so that the unmount
-// pulls nothing from under a task in the middle of a card operation. The UI
-// has been told to stop playback; the library, state and playlist tasks see
-// that storage_hold refuses, finish (or fail) what they are doing and give
-// their holds back. Polled, every CARD_FREE_POLL_MS, only during a loss.
+// pulls nothing from under a task in the middle of a card operation. Every
+// user of the card holds it (storage.h) while it works on it, the player
+// included (from opening a track's file to closing it), and no new hold is
+// granted now: the UI has been told to stop playback; the library, state and
+// playlist tasks finish (or fail) what they are doing and give their holds
+// back. Polled, every CARD_FREE_POLL_MS, only during a loss.
 static void wait_until_card_is_free(void) {
   uint32_t waited = 0;
   for (;;) {
-    player_status_t status;
-    player_get_status(&status);
     uint32_t holds = storage_holds();
-    if (status.state == PLAYER_STATE_IDLE && holds == 0) {
+    if (holds == 0) {
       break;
     }
     if (waited != 0 && waited % CARD_FREE_NAG_MS == 0) {
-      ESP_LOGW(TAG,
-               "still waiting to unmount: player %s, %" PRIu32 " holds",
-               status.state == PLAYER_STATE_IDLE ? "idle" : "busy", holds);
+      ESP_LOGW(TAG, "still waiting to unmount: %" PRIu32 " holds", holds);
     }
-    if (waited != 0 && waited % CARD_STOP_AGAIN_MS == 0 &&
-        status.state != PLAYER_STATE_IDLE) {
-      // A track the UI does not know of (the console's), or a stop the
-      // player could not take: stopped here too. The UI's own stop has
-      // already kept the track it had.
+    if (waited != 0 && waited % CARD_STOP_AGAIN_MS == 0) {
+      // The player may be the one holding it: a track the UI does not know
+      // of (the console's), or a stop the player could not take. Stopped
+      // here too (nothing if it is idle). The UI's own stop has already
+      // kept the track it had.
       player_stop();
     }
     vTaskDelay(pdMS_TO_TICKS(CARD_FREE_POLL_MS));

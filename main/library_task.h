@@ -60,8 +60,9 @@ typedef struct {
   bool scanning;       // a scan is running: show its progress
   bool full;           // the index is a partial one: a scan stopped because
                        // the index was full, and this is what it made (or
-                       // that same index loaded again after the card was
-                       // out); false while scanning
+                       // that same index loaded again later, after the
+                       // card was out or after a power-off: library_task.c,
+                       // PARTIAL INDEX); false while scanning
   uint32_t tracks;     // found so far, or in the finished index
   uint32_t generation; // counts the indexes published since start-up
 } library_status_t;

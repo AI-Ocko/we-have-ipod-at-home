@@ -6,6 +6,7 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "libscan.h"
+#include "nvs.h"
 #include "player.h"
 #include "player_status.h"
 #include "storage.h"
@@ -136,6 +137,23 @@
 // can be played from it until the card is back (the UI refuses), and the
 // boot that follows a remount replaces it.
 
+// PARTIAL INDEX
+//
+// The index file says nothing about whether the scan that made it stopped at
+// the cap, and has no spare field to say it (a new field would change the
+// format and make every card rescan once). So the checksum of the last
+// partial index is kept in flash instead: one u32, key "full_index" in the
+// namespace "library" (not the state task's "dap", so `state clear` leaves
+// it). A scan writes it when it stops at the cap and erases it when it
+// does not, each only if flash does not already say so (no write for a scan
+// that changes nothing); a load reports `full` when the index loaded has
+// that checksum. The checksum identifies the index, so another card's index
+// is not taken for the partial one. If flash cannot be used, `full` lasts
+// only until the power goes, as it is kept in memory too.
+
+#define FULL_NAMESPACE "library"
+#define FULL_KEY "full_index"
+
 #define TASK_STACK_BYTES 8192
 #define TASK_PRIORITY 3
 #define TASK_CORE 0
@@ -177,8 +195,9 @@ static TickType_t s_last_progress;
 
 // The last scan that stopped because the index was full: the checksum of
 // the partial index it made. A load of that same index later (after the
-// card has been out and back) is known to be partial too. Only the task
-// uses these.
+// card has been out and back, or after a power-off) is known to be partial
+// too. Kept in flash as well (see PARTIAL INDEX); only the task changes
+// these once it runs.
 static bool s_full_known;
 static uint32_t s_full_index;
 
@@ -417,6 +436,32 @@ static void stop_player(void) {
   ESP_LOGW(TAG, "the player did not stop; scanning anyway");
 }
 
+// See PARTIAL INDEX: what this scan found, in memory and in flash.
+static void remember_full(bool full, uint32_t index) {
+  bool changed = full != s_full_known || (full && index != s_full_index);
+  s_full_known = full;
+  s_full_index = index;
+  if (!changed) {
+    return;
+  }
+  nvs_handle_t nvs;
+  esp_err_t err = nvs_open(FULL_NAMESPACE, NVS_READWRITE, &nvs);
+  if (err == ESP_OK) {
+    err = full ? nvs_set_u32(nvs, FULL_KEY, index) : nvs_erase_key(nvs, FULL_KEY);
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
+      err = ESP_OK; // nothing to erase
+    }
+    if (err == ESP_OK) {
+      err = nvs_commit(nvs);
+    }
+    nvs_close(nvs);
+  }
+  if (err != ESP_OK) {
+    ESP_LOGW(TAG, "could not note the partial index in flash (%s)",
+             esp_err_to_name(err));
+  }
+}
+
 // Something failed during a scan: report it and wait (VERDICT_WAIT_MS at
 // most) for the task that mounts the card to have asked it. True if the
 // card has gone. See THE CARD GOING AWAY.
@@ -484,8 +529,7 @@ static void scan(void) {
     ESP_LOGW(TAG, "the index was not saved; the next start will scan again");
   }
 
-  s_full_known = stats.full;
-  s_full_index = library_checksum(lib);
+  remember_full(stats.full, library_checksum(lib));
   publish(lib);
   post_status(false, stats.tracks, stats.full);
 }
@@ -549,6 +593,13 @@ esp_err_t library_task_start(QueueHandle_t status) {
     return ESP_ERR_NO_MEM;
   }
   s_arena = arena;
+  // PARTIAL INDEX. Flash was opened by the state task, which starts first;
+  // if it could not be, there is nothing to read.
+  nvs_handle_t nvs;
+  if (nvs_open(FULL_NAMESPACE, NVS_READONLY, &nvs) == ESP_OK) {
+    s_full_known = nvs_get_u32(nvs, FULL_KEY, &s_full_index) == ESP_OK;
+    nvs_close(nvs);
+  }
   ESP_LOGI(TAG, "arena %u bytes; free now: psram %u, heap internal %u",
            (unsigned)LIBRARY_ARENA_BYTES,
            (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),

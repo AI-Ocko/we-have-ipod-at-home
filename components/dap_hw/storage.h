@@ -39,9 +39,9 @@
 //   answers changes nothing. Nobody asks the card anything while nothing has
 //   failed.
 //
-// The player is the one user of the card that takes no hold (player.c is not
-// changed for this): the mounting task waits for it to be idle instead, and
-// the UI reports its read errors (PLAYER_ERROR_IO).
+// The player holds the card from opening a track's file to closing it, and
+// refuses to open one when storage_hold refuses (a PLAYER_ERROR_IO); the UI
+// reports its read errors (PLAYER_ERROR_IO).
 
 // Set up what follows. Call once, first thing at start-up, before any other
 // task exists. Cannot fail (static memory).
@@ -55,8 +55,7 @@ void storage_init(void);
 esp_err_t storage_mount(void);
 
 // Unmount the card. Does nothing if it is not mounted. Only once no hold is
-// left (storage_holds); files the player may still have open are invalidated
-// (their next operation fails).
+// left (storage_holds), so no file is open.
 void storage_unmount(void);
 
 // Mounted, and not found to have gone (storage_begin_loss). Never blocks.
