@@ -234,11 +234,17 @@
 //
 // NO CARD, A SCAN, A CARD ERROR
 //
-// The card is mounted once, at start-up, and stays: with no card mounted a
-// request answers card error at once. Without an index (a scan is running)
-// a request answers library busy at once (see THE INDEX). A read or write
-// that fails answers card error, with the files as the notes above leave
-// them. Nothing is retried here: the UI decides what to do. Nothing aborts.
+// Each request is served under a hold on the card (storage.h), so the card
+// is not unmounted in the middle of one. With no card (none yet, or one
+// pulled out: the hold is refused) a request answers card error at once.
+// Without an index (a scan is running) a request answers library busy at
+// once (see THE INDEX). A read or write that fails answers card error, with
+// the files as the notes above leave them, and is reported
+// (storage_report_failure: the task that mounts the card then asks the card
+// whether it still answers). A card pulled out during a save leaves the
+// files as a power cut at that moment would, and the next listing after it
+// is back tidies them. Nothing is retried here: the UI decides what to do.
+// Nothing aborts.
 
 #define TASK_STACK_BYTES 6144
 #define TASK_PRIORITY 2
@@ -1182,12 +1188,13 @@ static playlist_outcome_t serve(const request_t *r,
   if (has_file && !is_playlist_file(request_file(r))) {
     return PLAYLIST_TASK_NO_ENTRY;
   }
-  if (!storage_is_mounted()) {
+  if (!storage_hold()) {
     return PLAYLIST_TASK_CARD_ERROR;
   }
   // Held for the whole request: see THE INDEX.
   const library_t *lib = library_task_get();
   if (lib == NULL && (library_task_busy() || needs_index(r))) {
+    storage_release();
     return PLAYLIST_TASK_LIBRARY_BUSY;
   }
   playlist_outcome_t outcome = PLAYLIST_TASK_NO_ENTRY;
@@ -1222,6 +1229,10 @@ static playlist_outcome_t serve(const request_t *r,
   }
   if (lib != NULL) {
     library_task_put();
+  }
+  storage_release();
+  if (outcome == PLAYLIST_TASK_CARD_ERROR) {
+    storage_report_failure();
   }
   return outcome;
 }

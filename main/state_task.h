@@ -133,6 +133,12 @@ void state_task_save_position(const state_position_t *position);
 // else to do. Call once.
 void state_task_card_ready(void);
 
+// The card has been mounted again after it was pulled out (the task that
+// mounts it calls this; never blocks). A queue save that failed while it was
+// away is made now. The files are not read again: state_task_card_ready is
+// for power-on only.
+void state_task_card_back(void);
+
 // Put the queue that was found on the card at start-up into `q`. `lib` is
 // the index now loaded (the caller holds it: library_task_get). True if the
 // file was whole and was saved for exactly this index; `q` is then as it was

@@ -152,9 +152,26 @@ of a second.
 **Settings → Rescan library**. The player does not notice new, moved or
 deleted files by itself.
 
-**Limits:** the index holds about 7,400 tracks (1.5 MB of memory). The queue
-holds 8,192 tracks, a playlist 1,000 entries, and the Playlists screen lists
-up to 200 playlists.
+**Limits:** the index holds about 7,400 tracks (1.5 MB of memory). On a card
+with more, the scan stops when the index is full and keeps what it found: the
+screen says `Library full` for a moment, and **About** shows the count
+followed by `(full)` (`7400 trk (full)`) until the next scan. The queue holds
+8,192 tracks, a playlist 1,000 entries, and the Playlists screen lists up to
+200 playlists.
+
+**Taking the card out while the player is on:** no reset is needed. The
+player notices when it next reads the card (at once if music is playing;
+otherwise when you next play something or open a playlist): playback stops,
+the screen says `Card error` for a moment and then `Insert SD card`, and the
+player tries the card every 2 seconds. Push the card back in and it carries
+on by itself: the library is loaded again, and if it is the same card the
+queue and the track on Now Playing are kept, so `D` resumes where it stopped.
+A different card (or one whose music has changed since its last scan) starts
+with an empty queue, as after a rescan. Settings are not affected. While the
+card is out the volume keys, `C` and Now Playing still work; the menus show
+`Insert SD card`. Changes you made just before (a playlist edit, the queue)
+are either saved whole or not at all: the queue is saved again once the card
+is back; a playlist edit that answered `Card error` needs doing again.
 
 ---
 
@@ -395,7 +412,7 @@ ignored. The player accepts:
   `/Music/Artist/Album/01 Song.flac`;
 - **full computer paths**, such as `/run/media/me/CARD/Music/...`,
   `/Volumes/CARD/Music/...`, `E:\Music\...` or `file:///...` URLs: the
-  player drops the leading folders until the rest matches a track;
+  player drops up to six leading folders until the rest matches a track;
 - Windows backslashes, CRLF line ends and a UTF-8 byte-order mark.
 
 Capital and small letters do not matter (for plain A to Z). A computer-made
@@ -471,12 +488,12 @@ idf.py -p /dev/ttyUSB0 flash
 | What you see | What to do |
 |---|---|
 | `Insert SD card` | The card did not start. The player tries again every 2 seconds. Take the card out and click it back in. On a computer's USB port this happens after plug-in when the LCD is attached: re-seat the card once, or use a phone charger. Check the card is FAT32. |
-| The card was taken out while the player was running | The player only looks for the card when it starts. Put it back and reset the board (the EN button) or unplug and replug the power. |
-| `Can't play` (bottom row of Now Playing) | The file would not decode (damaged, not really FLAC/MP3, or an unusual sample rate). The player skips to the next track after 1.5 s. After three in a row it stops. |
+| `Card error`, then `Insert SD card`, while the player was running | The card was taken out, or stopped answering. Push it back in (or take it out and click it back in); the player finds it within 2 seconds and carries on with no reset: press `D` to resume. See [Taking the card out](#the-card). If it happens with the card in place, check the card's contacts and the power supply. |
+| `Can't play` (bottom row of Now Playing) | The file would not decode (damaged, not really FLAC/MP3, an unusual sample rate, or an unusual bit depth: FLAC is played at 16 or 24 bits). The player skips to the next track after 1.5 s. After three in a row it stops. |
 | `File missing` | The file has gone since the last scan. The player skips it. Run **Rescan library** after changing the card. |
 | `(missing)` in a playlist | See [Entries marked (missing)](#entries-marked-missing). |
-| Not all your music is listed | The index holds about 7,400 tracks. A larger card is scanned until the index is full and the rest is left out. The screen does not say so; the serial log says `full`. Also check for files more than 8 folders deep or with very long paths, and that you ran **Rescan library**. |
-| `Card error` | Reading or writing a playlist failed. Try again; if it keeps happening, check the card on a computer. On the Playlists screen it may show as `>Card error`: press `5` to try again. |
+| Not all your music is listed, or `Library full` | The index holds about 7,400 tracks. A larger card is scanned until the index is full and the rest is left out: the scan ends with `Library full`, and **About** shows `(full)` after the count. Also check for files more than 8 folders deep or with very long paths, and that you ran **Rescan library**. |
+| `Card error` (bottom row) | Reading or writing a playlist failed. Try again; if it keeps happening, check the card on a computer. On the Playlists screen it may show as `>Card error`: press `5` to try again. If the card itself has stopped answering, `Card error` fills the top row and `Insert SD card` follows (see above). |
 | `Library busy` | A scan is running (or the last scan failed). Wait for it to finish. |
 | No text on the LCD, backlight on | The LCD is on 3.3V: move its VDD wire to **5V**. If it has a contrast screw, turn it. |
 | LCD dark, no backlight | Check its four wires. Or the backlight timed out: press any key. |
@@ -506,12 +523,14 @@ Main commands:
 | `stat` | Player state, position, volume, memory and the UI's numbers (backlight, sleep timer). |
 | `screen` | What the LCD shows. |
 | `key <k>`, `long <k>`, `hold <k> <n>` | Press a key, long-press it, or hold it for `n` repeats. |
-| `play <path> [ms]`, `pause`, `resume`, `stop`, `seek <ms>`, `vol <n>` | Drive the player directly (not saved). |
+| `play <path> [ms]`, `pause`, `resume`, `seek <ms>`, `vol <n>` | Drive the player directly (not saved). |
+| `stop` | Stop through the user interface, as the sleep timer does: the track stays on Now Playing and `D` plays it again (a queue track from where it stopped, a `play`ed one from the start). |
 | `queue [from [count]]` | What the queue holds. |
 | `lib`, `lib artists`, `lib find <path>`, ... | What the library index holds. |
 | `scan` | Rescan the card. |
 | `state` | What is saved for the next power-on. `state clear` erases it. |
-| `pl ls`, `pl show <n>`, `pl new <name>`, `pl add`, `pl rm`, `pl mv`, `pl del`, `pl free`, ... | Playlists. |
+| `pl ls`, `pl show <n>`, `pl new <name>`, `pl add`, `pl rm`, `pl up`, `pl down`, `pl mv`, `pl del`, `pl free`, ... | Playlists. |
+| `card lost`, `card check` | Test aids: act as if the card had stopped answering (the player unmounts it and finds it again 2 seconds later), or have the card asked whether it answers. |
 
 Every command and the exact form of its answers are described at the top of
 `main/debug_console.h`.

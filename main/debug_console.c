@@ -11,6 +11,7 @@
 #include "player_status.h"
 #include "playlist_task.h"
 #include "state_task.h"
+#include "storage.h"
 #include "ui.h"
 #include <ctype.h>
 #include <errno.h>
@@ -992,6 +993,20 @@ static void refresh_screen(void) {
   xQueueSend(s_key_events, &nothing, 0);
 }
 
+// `card lost`: as if a task had met a card failure and the card had then
+// not answered. `card check`: a failure reported, and the card really asked.
+static const char *cmd_card(const char *args) {
+  if (strcmp(args, "lost") == 0) {
+    storage_simulate_loss();
+    return NULL;
+  }
+  if (strcmp(args, "check") == 0) {
+    storage_report_failure();
+    return NULL;
+  }
+  return "usage: card lost | card check";
+}
+
 static void run_line(const char *line) {
   strlcpy(s_work, line, sizeof(s_work));
   char *word = skip_spaces(s_work);
@@ -1045,6 +1060,8 @@ static void run_line(const char *line) {
     why = cmd_queue(args);
   } else if (strcmp(word, "pl") == 0) {
     why = cmd_pl(args);
+  } else if (strcmp(word, "card") == 0) {
+    why = cmd_card(args);
   } else {
     why = "unknown command";
   }

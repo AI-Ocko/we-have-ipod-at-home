@@ -63,15 +63,17 @@
 //                                            "Queue full", and the
 //                                            playlists' words (overlay_text),
 //                                            16 columns at most
-//   About               |1028 tracks     |
+//   About               |1028 tracks     |   "1028 trk (full)" when a
+//                                            scan stopped at the cap
 //                       |Free 912 MB  Bui|   a marquee: the free space and
 //                                            "Built Oct  7 2026"; "Free ..."
 //                                            until it is known, "Free ?" if
 //                                            it cannot be
 //   scanning            |Scanning...     |
 //                       |412 tracks      |
-//   waiting             |Insert SD card  |
-//                       |                |
+//   waiting             |Insert SD card  |   over the menus; after a card
+//                       |                |   was pulled out, "Card error"
+//                                            for 1.5 s first
 //   key test            keytest_render (keytest.h)
 
 #define ITEM_COL 1 // the item starts after the `>`
@@ -270,7 +272,15 @@ static void about_row(const ui_t *ui, char *out, size_t size) {
 
 static void render_about(const ui_t *ui, int64_t now_us, screen_t *screen) {
   char text[ABOUT_ROW_MAX];
-  snprintf(text, sizeof(text), "%" PRIu32 " tracks", ui->about_tracks);
+  if (!ui->library_full) {
+    snprintf(text, sizeof(text), "%" PRIu32 " tracks", ui->about_tracks);
+  } else if (snprintf(text, sizeof(text), "%" PRIu32 " tracks (full)",
+                      ui->about_tracks) > SCREEN_COLS) {
+    // A partial index (a scan stopped at the cap): a count of 100 or more
+    // leaves room only for the short word ("65535 trk (full)", the most
+    // there can be, is exactly the 16 columns).
+    snprintf(text, sizeof(text), "%" PRIu32 " trk (full)", ui->about_tracks);
+  }
   screen_set_row(screen, 0, text);
   about_row(ui, text, sizeof(text));
   marquee_window(text, SCREEN_COLS, ms_since(ui->about_since_us, now_us),
@@ -392,6 +402,8 @@ static const char *overlay_text(ui_overlay_t overlay) {
     return "Can't start w/ ."; // exactly the 16 columns
   case UI_OVERLAY_NAME_RESERVED:
     return "Name reserved";
+  case UI_OVERLAY_LIBRARY_FULL:
+    return "Library full";
   case UI_OVERLAY_NOT_FOUND:
     return "Not found";
   case UI_OVERLAY_VOLUME:
@@ -444,7 +456,9 @@ void ui_render(const ui_t *ui, const player_status_t *player, int64_t now_us,
     break;
   case UI_MODE_MENU:
     if (ui->no_card) {
-      screen_set_row(screen, 0, "Insert SD card");
+      screen_set_row(screen, 0,
+                     now_us < ui->card_error_until_us ? "Card error"
+                                                      : "Insert SD card");
       screen_set_row(screen, 1, "");
     } else if (ui->scanning) {
       render_scanning(ui, screen);
@@ -470,6 +484,12 @@ uint32_t ui_next_change_ms(const ui_t *ui, int64_t now_us) {
   bool overlay = overlay_on(ui, now_us);
   if (overlay) {
     next = ms_until(ui->overlay_until_us, now_us);
+  }
+  if (ui->no_card && ui->mode == UI_MODE_MENU &&
+      now_us < ui->card_error_until_us) {
+    // "Card error" gives way to "Insert SD card".
+    ms = ms_until(ui->card_error_until_us, now_us);
+    next = ms < next ? ms : next;
   }
   if (ui->play.notice_until_us != 0) {
     // Whatever screen is up: when it runs out the next track starts.

@@ -58,7 +58,10 @@
 // reads it gets the newest state however many it missed.
 typedef struct {
   bool scanning;       // a scan is running: show its progress
-  bool full;           // the last scan stopped because the index was full
+  bool full;           // the index is a partial one: a scan stopped because
+                       // the index was full, and this is what it made (or
+                       // that same index loaded again after the card was
+                       // out); false while scanning
   uint32_t tracks;     // found so far, or in the finished index
   uint32_t generation; // counts the indexes published since start-up
 } library_status_t;
@@ -71,10 +74,12 @@ typedef struct {
 // once, a rescan is refused).
 esp_err_t library_task_start(QueueHandle_t status);
 
-// Once the card is mounted: load the saved index, or scan the card if there
-// is none that can be used. Returns when the library is ready (or there is
-// not going to be one), so it can take as long as a scan does; call it from
-// a task that has nothing else to do.
+// Each time the card is mounted (at start-up, and again after it was pulled
+// out and put back): load the saved index, or scan the card if there is none
+// that can be used. Returns once the request is made; the status queue says
+// when the new index is published. If the task is still busy with an
+// earlier request it waits for it, in steps of 100 ms; so call it from a
+// task that has nothing else to do (the one that mounts the card).
 void library_task_boot(void);
 
 // Start a scan of the whole card and return at once. Playback is stopped

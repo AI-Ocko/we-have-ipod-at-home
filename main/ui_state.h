@@ -107,6 +107,7 @@ typedef enum {
   UI_OVERLAY_BAD_END,
   UI_OVERLAY_BAD_START,
   UI_OVERLAY_NAME_RESERVED, // a name Windows keeps for a device (CON, ...)
+  UI_OVERLAY_LIBRARY_FULL,  // a scan stopped because the index was full
   UI_OVERLAY_NOT_FOUND,     // an append's playlist (or a create's tracks)
                             // gone meanwhile
 } ui_overlay_t;
@@ -255,8 +256,12 @@ typedef struct {
   ui_layer_t layer; // over the menus or Now Playing
 
   // What the rest of the system has said.
-  bool no_card;        // start-up is still waiting for a card that mounts
+  bool no_card;        // no card is mounted: start-up is waiting for one,
+                       // or one was pulled out and is waited for again
+  int64_t card_error_until_us; // "Card error" covers "Insert SD card" until
+                               // then (a card that was pulled out); 0: not
   bool scanning;       // the library is being scanned
+  bool library_full;   // the index is a partial one (library_status_t.full)
   uint32_t scan_tracks;
   uint32_t generation; // of the index the numbers held below belong to
 

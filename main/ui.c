@@ -75,11 +75,12 @@
 //                `browse` (numbers only) and the copy of the current list's
 //                texts (list_*). A playlist screen still waiting for its
 //                listing or its entries says "Loading" (list_loading).
-//                While start-up waits for a card, "Insert SD card" covers
-//                the list; while the library is scanned, "Scanning..." and
-//                the count do. These are not modes: they come and go with
-//                what the card and the library report, and the list keys do
-//                nothing while one is up.
+//                While there is no card (start-up waits for one, or one was
+//                pulled out: THE CARD), "Insert SD card" covers the list;
+//                while the library is scanned, "Scanning..." and the count
+//                do. These are not modes: they come and go with what the
+//                card and the library report, and the list keys do nothing
+//                while one is up.
 //   NOW_PLAYING  the current track's title and artist, the play or pause
 //                symbol, the time and the shuffle and loop marks; "Nothing
 //                playing" if there is no track. Its state is ui_t.play and
@@ -277,6 +278,26 @@
 // With no index (a scan that failed, or before the first load) the library's
 // lists are empty: the list's name and "(empty)".
 //
+// A scan that stopped because the index was full says "Library full" for
+// 1.5 s as it ends, and About shows "(full)" after the track count for as
+// long as that partial index is the one loaded (library_status_t.full).
+//
+// THE CARD
+//
+// The task that mounts the card sends card events (ui_card_waiting,
+// ui_card_lost); this task never touches the card. When the card is pulled
+// out while the player runs: playback stops as ui_stop stops it (the track
+// stays on Now Playing, at the time it had reached), any layer closes, the
+// menus come up with "Card error" over them for 1.5 s and then "Insert SD
+// card", and nothing starts a track until the card is back (D, 4, 6, a
+// scrub and a notice running out all look at no_card). Keys keep working:
+// the volume, C to Now Playing and back, shuffle and loop, the options menu
+// on Now Playing. The backlight and sleep timers keep counting. The index
+// that was loaded stays (it is in memory); when the card is back the library
+// publishes one again, and the queue is kept if it is the same index or
+// emptied if not, as after a scan (ui_play.c, A NEW INDEX). The UI reports a
+// track's read error (PLAYER_ERROR_IO) as a card failure (storage.h).
+//
 // MEMORY
 //
 // The queue's two orders, 8,192 track numbers each, are one block of 32 KB
@@ -339,6 +360,7 @@ static bool s_standby_fading;
 // the "insert card" screen itself; it sends one of these instead.
 typedef enum {
   CARD_EVENT_WAITING, // the card did not mount; the mount is being retried
+  CARD_EVENT_LOST,    // the card stopped answering; it is to be retried
   CARD_EVENT_MOUNTED, // the wait is over
 } card_event_t;
 
@@ -1031,9 +1053,11 @@ static void ui_on_key(ui_t *ui, const key_event_t *event, int64_t now_us) {
 static void ui_on_library_status(ui_t *ui, const library_status_t *status,
                                  int64_t now_us) {
   bool scan_began = status->scanning && !ui->scanning;
+  bool scan_ended = !status->scanning && ui->scanning;
   ui->scanning = status->scanning;
   ui->scan_tracks = status->tracks;
   if (scan_began) {
+    ui->library_full = false; // "(full)" lasts until the next scan
     // The scan wants the card to itself. The library task stops the
     // player, but it cannot stop a track this task is about to start.
     ui_play_stop(ui);
@@ -1053,14 +1077,45 @@ static void ui_on_library_status(ui_t *ui, const library_status_t *status,
     // Playing looked up again: ui_play.c. A track restored at power-on waits
     // on Now Playing.
     ui->generation = status->generation;
+    ui->library_full = status->full;
     browse_library_changed(&ui->browse);
     ui_pl_index_changed(ui, now_us); // layers close; the open playlist too
     ui->list_restart = true;
     if (ui_play_library_changed(ui, now_us) && ui->mode != UI_MODE_KEYTEST) {
       ui_show_now_playing(ui, now_us);
     }
+    if (scan_ended && status->full) {
+      // After the screen change above, which would end the words.
+      ESP_LOGW(TAG, "Library full: the scan stopped at the index's cap");
+      ui_overlay_show(ui, UI_OVERLAY_LIBRARY_FULL, now_us);
+    }
   }
   // With or without a new index, what the lists hold may have changed.
+  ui->list_dirty = true;
+}
+
+// What the task that mounts the card says. See THE CARD.
+static void ui_on_card_event(ui_t *ui, card_event_t event, int64_t now_us) {
+  switch (event) {
+  case CARD_EVENT_WAITING:
+    ui->no_card = true;
+    break;
+  case CARD_EVENT_LOST:
+    ESP_LOGW(TAG, "CARD lost: stopping");
+    ui_play_stop(ui); // the track stays; D resumes it when the card is back
+    ui->no_card = true;
+    ui->card_error_until_us = now_us + UI_OVERLAY_MS * 1000;
+    ui_close_layer(ui);
+    if (ui->mode != UI_MODE_KEYTEST) {
+      ui_show_menus(ui); // where "Card error" is seen
+    }
+    break;
+  case CARD_EVENT_MOUNTED:
+    ESP_LOGI(TAG, "CARD mounted");
+    ui->no_card = false;
+    ui->card_error_until_us = 0;
+    break;
+  }
   ui->list_dirty = true;
 }
 
@@ -1079,8 +1134,7 @@ static void ui_take(ui_t *ui, QueueSetMemberHandle_t ready, int64_t now_us) {
   } else if (ready == s_card_events) {
     card_event_t event;
     if (xQueueReceive(s_card_events, &event, 0) == pdTRUE) {
-      ui->no_card = (event == CARD_EVENT_WAITING);
-      ui->list_dirty = true;
+      ui_on_card_event(ui, event, now_us);
     }
   } else if (ready == s_library_status) {
     library_status_t status;
@@ -1300,10 +1354,17 @@ esp_err_t ui_start(ui_queues_t *queues) {
   return ESP_OK;
 }
 
+// Card events come from one task, the one that mounts the card, one at a
+// time and seconds apart (a loss, then at least one 2 s retry before the
+// card is back), so the queue of two is never full in practice; if it were,
+// that task would wait for room, and the UI never waits for it.
 void ui_card_waiting(bool waiting) {
-  // At most two card events are ever sent, and the queue holds two, so
-  // neither send can block or be lost.
   card_event_t event = waiting ? CARD_EVENT_WAITING : CARD_EVENT_MOUNTED;
+  xQueueSend(s_card_events, &event, portMAX_DELAY);
+}
+
+void ui_card_lost(void) {
+  const card_event_t event = CARD_EVENT_LOST;
   xQueueSend(s_card_events, &event, portMAX_DELAY);
 }
 

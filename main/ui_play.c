@@ -400,6 +400,13 @@ static void start(ui_t *ui, uint32_t start_ms) {
   play->started = false;
   play->notice_until_us = 0;
   play->elapsed_ms = start_ms;
+  if (ui->no_card) {
+    // Nothing starts without a card (ui.c, THE CARD): the track waits on
+    // Now Playing, as one D starts once the card is back.
+    play->active = false;
+    save_position(ui);
+    return;
+  }
   if (player_play(play->path, start_ms, &id) == ESP_OK) {
     play->play_id = id;
     play->min_id = id;
@@ -582,9 +589,10 @@ static moved_t move(ui_t *ui, move_t how, int64_t now_us) {
 }
 
 // The current track is over (it ended, or it cannot play). Start what the
-// queue says follows it, if anything does.
+// queue says follows it, if anything does. Nothing does while there is no
+// card (ui.c, THE CARD): playback comes to rest on the track that is over.
 static void advance(ui_t *ui, move_t how, int64_t now_us) {
-  if (ui->play.from_queue && ui->queue.count != 0 &&
+  if (ui->play.from_queue && ui->queue.count != 0 && !ui->no_card &&
       move(ui, how, now_us) == MOVED) {
     start(ui, 0);
   } else {
@@ -907,6 +915,12 @@ void ui_play_on_event(ui_t *ui, const player_event_t *event, int64_t now_us) {
   }
   case PLAYER_EVENT_ERROR:
     ESP_LOGE(PLAYER_TAG, "ERROR reason=%s", error_name(event->error));
+    if (!old && event->error == PLAYER_ERROR_IO) {
+      // The card may have gone: the task that mounts it asks it (storage.h).
+      // If it has, ui_card_lost follows within a few milliseconds and ends
+      // the notice; if not, the notice runs its course.
+      storage_report_failure();
+    }
     if (!old) {
       ui_play_scrub_drop(ui, "the track failed");
       play->active = false;

@@ -110,11 +110,31 @@
 // or with a rescan; no boot can use a damaged one, and none gets stuck.
 // A first scan (no .idx yet) is the same with step 2 finding nothing.
 //
-// If saving fails (card full, write-protected, pulled out) the index just
-// built is still used; the next boot will scan again.
+// If saving fails (card full, write-protected) the index just built is
+// still used; the next boot will scan again.
 //
-// The mount must exist before any of this runs; `library_task_boot` is
-// called after the card is mounted and a rescan is refused without one.
+// THE CARD GOING AWAY
+//
+// Each request is served under a hold on the card (storage.h): the card is
+// not unmounted while a load, a scan or a save is going on. A request that
+// finds no card (the hold refused) does nothing; there is no index to load
+// until the card is back, and then the task that mounts it asks for a boot
+// again (library_task_boot), which loads the index from the card or scans.
+//
+// A load that fails with a read error reports the failure (the task that
+// mounts the card then checks whether it still answers). A scan stops at the
+// next track once the card has been found to have gone (on_progress), and
+// one that met any failure at all (a file or folder that could not be read,
+// the save) asks for the verdict on the card before it publishes anything
+// (card_went_away): a card that went away part-way leaves a walk that ended
+// early and looks whole, and publishing it would empty the queue for an
+// index nobody has. So a scan during which the card went away publishes
+// nothing ("scan failed"), and the index comes back with the card.
+//
+// The index that stays published while the card is away is the one that
+// was loaded: it is in memory, and still names the card's files. Nothing
+// can be played from it until the card is back (the UI refuses), and the
+// boot that follows a remount replaces it.
 
 #define TASK_STACK_BYTES 8192
 #define TASK_PRIORITY 3
@@ -131,6 +151,10 @@
 #define PLAYER_STOP_WAIT_MS 3000
 #define READER_COMPLAINT_MS 5000
 
+// How long a scan that met a failure waits for the verdict on the card: one
+// status command, which takes milliseconds; this only bounds it.
+#define VERDICT_WAIT_MS 2000
+
 #define REQUEST_BOOT (1u << 0)
 #define REQUEST_SCAN (1u << 1)
 
@@ -139,7 +163,6 @@ static const char *TAG = "library";
 static void *s_arena;
 static TaskHandle_t s_task;
 static QueueHandle_t s_status;
-static SemaphoreHandle_t s_boot_done;
 static SemaphoreHandle_t s_readers_gone;
 
 // Guards the four fields below it. Held for a few instructions at a time.
@@ -151,6 +174,13 @@ static bool s_busy;            // a request is queued or being served
 
 static uint32_t s_generation;
 static TickType_t s_last_progress;
+
+// The last scan that stopped because the index was full: the checksum of
+// the partial index it made. A load of that same index later (after the
+// card has been out and back) is known to be partial too. Only the task
+// uses these.
+static bool s_full_known;
+static uint32_t s_full_index;
 
 // --- Readers ---------------------------------------------------------------
 
@@ -253,10 +283,16 @@ static library_result_t load_file(const char *path, const library_t **out,
   FILE *f = fopen(path, "rb");
   if (f == NULL) {
     *missing = (errno == ENOENT);
+    if (!*missing) {
+      storage_report_failure();
+    }
     return LIBRARY_IO;
   }
   library_result_t result = library_load(s_arena, LIBRARY_ARENA_BYTES, f, out);
   fclose(f);
+  if (result == LIBRARY_IO) {
+    storage_report_failure();
+  }
   return result;
 }
 
@@ -315,7 +351,8 @@ static bool load(void) {
            library_track_count(lib), library_album_count(lib),
            library_artist_count(lib), ms_since(start));
   publish(lib);
-  post_status(false, library_track_count(lib), false);
+  post_status(false, library_track_count(lib),
+              s_full_known && library_checksum(lib) == s_full_index);
   return true;
 }
 
@@ -349,6 +386,9 @@ static bool save_index(const library_t *lib) {
 // overwritten, not queued behind.
 static bool on_progress(void *ctx, const libscan_stats_t *stats) {
   (void)ctx;
+  if (!storage_is_mounted()) {
+    return false; // the card has gone: abandon (THE CARD GOING AWAY)
+  }
   TickType_t now = xTaskGetTickCount();
   if ((TickType_t)(now - s_last_progress) >= pdMS_TO_TICKS(PROGRESS_PERIOD_MS)) {
     s_last_progress = now;
@@ -377,6 +417,21 @@ static void stop_player(void) {
   ESP_LOGW(TAG, "the player did not stop; scanning anyway");
 }
 
+// Something failed during a scan: report it and wait (VERDICT_WAIT_MS at
+// most) for the task that mounts the card to have asked it. True if the
+// card has gone. See THE CARD GOING AWAY.
+static bool card_went_away(void) {
+  if (!storage_is_mounted()) {
+    return true;
+  }
+  uint32_t seen = storage_report_failure();
+  for (uint32_t waited = 0;
+       waited < VERDICT_WAIT_MS && storage_checks() == seen; waited += 10) {
+    vTaskDelay(pdMS_TO_TICKS(10));
+  }
+  return !storage_is_mounted();
+}
+
 static void scan(void) {
   post_status(true, 0, false);
   s_last_progress = xTaskGetTickCount();
@@ -388,14 +443,21 @@ static void scan(void) {
   libscan_stats_t stats = {0};
   library_builder_t *builder =
       library_builder_begin(s_arena, LIBRARY_ARENA_BYTES);
-  if (builder != NULL &&
-      libscan_run(STORAGE_MOUNT_POINT, builder, on_progress, NULL, &stats)) {
+  bool walked = builder != NULL && libscan_run(STORAGE_MOUNT_POINT, builder,
+                                               on_progress, NULL, &stats);
+  if (walked) {
     lib = library_builder_finish(builder);
   }
-  if (lib == NULL) {
-    // The card could not be listed at all. There is no library until the
-    // next scan; the player still plays what it is given.
-    ESP_LOGE(TAG, "scan failed: the card could not be read");
+  bool gone = false;
+  if (lib == NULL || stats.unreadable != 0 || stats.skipped != 0) {
+    gone = card_went_away();
+  }
+  if (lib == NULL || gone) {
+    // The card could not be listed, or went away during the walk. There is
+    // no library until the next scan or the card is back; the player still
+    // plays what it is given.
+    ESP_LOGE(TAG, "scan failed: %s",
+             gone ? "the card went away" : "the card could not be read");
     post_status(false, 0, false);
     return;
   }
@@ -412,10 +474,18 @@ static void scan(void) {
   if (save_index(lib)) {
     ESP_LOGI(TAG, "saved %" PRIu32 " bytes in %" PRIu32 " ms",
              library_bytes(lib), ms_since(save_start));
+  } else if (card_went_away()) {
+    // The walk may have ended early without saying so: see THE CARD GOING
+    // AWAY. What the save left is a .tmp that the next load rejects.
+    ESP_LOGE(TAG, "scan failed: the card went away while it was saved");
+    post_status(false, 0, false);
+    return;
   } else {
     ESP_LOGW(TAG, "the index was not saved; the next start will scan again");
   }
 
+  s_full_known = stats.full;
+  s_full_index = library_checksum(lib);
   publish(lib);
   post_status(false, stats.tracks, stats.full);
 }
@@ -427,12 +497,19 @@ static void library_task(void *arg) {
   for (;;) {
     uint32_t request = 0;
     xTaskNotifyWait(0, UINT32_MAX, &request, portMAX_DELAY);
-    if (request & REQUEST_BOOT) {
-      if (!load()) {
+    if (!storage_hold()) {
+      // No card (it went away after the request was made). A boot is asked
+      // for again when it is back.
+      ESP_LOGW(TAG, "no card: nothing loaded or scanned");
+    } else {
+      if (request & REQUEST_BOOT) {
+        if (!load() && storage_is_mounted()) {
+          scan();
+        }
+      } else if (request & REQUEST_SCAN) {
         scan();
       }
-    } else if (request & REQUEST_SCAN) {
-      scan();
+      storage_release();
     }
     ESP_LOGI(TAG, "stack free %u, heap internal %u (least ever %u), psram %u",
              (unsigned)uxTaskGetStackHighWaterMark(NULL),
@@ -443,9 +520,6 @@ static void library_task(void *arg) {
     portENTER_CRITICAL(&s_lock);
     s_busy = false;
     portEXIT_CRITICAL(&s_lock);
-    if (request & REQUEST_BOOT) {
-      xSemaphoreGive(s_boot_done);
-    }
   }
 }
 
@@ -460,11 +534,10 @@ static bool claim(void) {
 
 esp_err_t library_task_start(QueueHandle_t status) {
   s_status = status;
-  s_boot_done = xSemaphoreCreateBinary();
   s_readers_gone = xSemaphoreCreateBinary();
   void *arena = heap_caps_malloc(LIBRARY_ARENA_BYTES,
                                  MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-  if (s_boot_done == NULL || s_readers_gone == NULL || arena == NULL ||
+  if (s_readers_gone == NULL || arena == NULL ||
       xTaskCreatePinnedToCore(library_task, "library", TASK_STACK_BYTES, NULL,
                               TASK_PRIORITY, &s_task, TASK_CORE) != pdPASS) {
     ESP_LOGE(TAG, "no memory for the library (%u bytes of PSRAM wanted, %u "
@@ -488,12 +561,13 @@ void library_task_boot(void) {
     return;
   }
   // A rescan asked for in the instant between the mount and this call has
-  // the task already; let it finish. (A sleep, and only in that case.)
+  // the task already, or (after a remount) the request it was serving when
+  // the card went has not quite finished; let it. (A sleep, and only in
+  // that case.)
   while (!claim()) {
     vTaskDelay(pdMS_TO_TICKS(100));
   }
   xTaskNotify(s_task, REQUEST_BOOT, eSetBits);
-  xSemaphoreTake(s_boot_done, portMAX_DELAY);
 }
 
 esp_err_t library_task_rescan(void) {

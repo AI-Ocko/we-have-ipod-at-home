@@ -214,11 +214,25 @@
 // and the failed copy is never written. If a newer queue was already
 // waiting when the write failed, nothing is put back at all.
 //
-// With no card mounted (it is mounted once, at start-up, and never taken
-// away, so this is only for a card that never came) the write stops at
-// that check and logs it, as before; the task does not set its own timer
-// then, and the copy is tried again on the first save pass (a hand-over of
-// anything) after the back-off, which the log says.
+// With no card (one that never came, or one pulled out while the player
+// runs) the write stops at that check (storage_hold) and logs it; the copy
+// waits for the card. The task does not set its own timer then: the task
+// that mounts the card tells it when the card is back
+// (state_task_card_back), and the waiting copy is written at once. A copy
+// that a pulled card cut short is never trusted: the write fails, the .tmp
+// it leaves (if the unlink could not remove it either) is written over by
+// that next save, and a power-on before then finds it damaged and discards
+// it (SAVING THE FILE).
+//
+// THE CARD
+//
+// Every piece of work on the card (reading the files at power-on, the
+// tidying, a save, the console's report and clear) is done under a hold
+// (storage.h), so the card is never unmounted under it, and a card I/O
+// failure is reported (storage_report_failure) so that the task that mounts
+// the card asks it whether it still answers. The files found at power-on
+// are read once: a remount does not read them again (the queue in the UI's
+// memory is the authority then).
 //
 // MEMORY DURING A SAVE
 //
@@ -306,6 +320,7 @@
 #define REQUEST_TIDY (1u << 2)   // the files read at start-up are done with
 #define REQUEST_REPORT (1u << 3) // the console's `state`
 #define REQUEST_CLEAR (1u << 4)  // the console's `state clear`
+#define REQUEST_CARD_BACK (1u << 5) // the card was mounted again
 
 // A queue file that could not be written is tried again after this long,
 // doubled at each failure in a row up to the most. See A FAILED SAVE.
@@ -735,6 +750,9 @@ static uint8_t *read_file(const char *path, size_t *bytes, bool *exists,
   }
   if (got != (ssize_t)size) {
     ESP_LOGW(TAG, "could not read %s", path);
+    if (block != NULL) {
+      storage_report_failure(); // the card failed, not the allocation
+    }
     heap_caps_free(block);
     *unreadable = true;
     return NULL;
@@ -746,13 +764,17 @@ static uint8_t *read_file(const char *path, size_t *bytes, bool *exists,
 // The card has just been mounted: read both files (see RESTORING).
 static void read_found(void) {
   int64_t start = esp_timer_get_time();
-  uint8_t *found[FOUND_FILES];
-  size_t bytes[FOUND_FILES];
-  bool tmp_exists, queue_exists, tmp_unreadable, queue_unreadable;
-  found[FOUND_TMP] =
-      read_file(TMP_PATH, &bytes[FOUND_TMP], &tmp_exists, &tmp_unreadable);
-  found[FOUND_QUEUE] = read_file(QUEUE_PATH, &bytes[FOUND_QUEUE],
-                                 &queue_exists, &queue_unreadable);
+  uint8_t *found[FOUND_FILES] = {NULL, NULL};
+  size_t bytes[FOUND_FILES] = {0, 0};
+  bool tmp_exists = false, queue_exists = false;
+  bool tmp_unreadable = false, queue_unreadable = false;
+  if (storage_hold()) {
+    found[FOUND_TMP] =
+        read_file(TMP_PATH, &bytes[FOUND_TMP], &tmp_exists, &tmp_unreadable);
+    found[FOUND_QUEUE] = read_file(QUEUE_PATH, &bytes[FOUND_QUEUE],
+                                   &queue_exists, &queue_unreadable);
+    storage_release();
+  }
   ESP_LOGI(TAG, "queue file: %u bytes%s, read in %" PRIu32 " us",
            (unsigned)bytes[FOUND_QUEUE],
            !tmp_exists       ? ""
@@ -785,10 +807,12 @@ static void read_found(void) {
 static bool replace_queue_file(void) {
   if (unlink(QUEUE_PATH) != 0 && errno != ENOENT) {
     ESP_LOGW(TAG, "could not remove the old queue file (%s)", strerror(errno));
+    storage_report_failure();
     return false;
   }
   if (rename(TMP_PATH, QUEUE_PATH) != 0) {
     ESP_LOGW(TAG, "could not rename the new queue file (%s)", strerror(errno));
+    storage_report_failure();
     return false;
   }
   return true;
@@ -827,8 +851,7 @@ static void file_is_stale(void) {
 // After a write that failed: when to try again. Each failure in a row
 // doubles the wait, from QUEUE_RETRY_FIRST_MS up to QUEUE_RETRY_MAX_MS. The
 // task's own timer is set only if the card is mounted; with no card the copy
-// waits for the next save pass after the back-off, which looks for the card
-// before anything else.
+// waits for the card to come back (state_task_card_back).
 static void back_off(void) {
   if (s_failing) {
     s_backoff *= 2;
@@ -843,10 +866,7 @@ static void back_off(void) {
   if (s_retry_armed) {
     ESP_LOGW(TAG, "the queue will be saved again in %" PRIu32 " s", s);
   } else {
-    ESP_LOGW(TAG,
-             "the queue will be tried again with the first save after "
-             "%" PRIu32 " s",
-             s);
+    ESP_LOGW(TAG, "the queue will be saved again when the card is back");
   }
 }
 
@@ -904,6 +924,21 @@ static void tidy(void) {
 
   heap_caps_free(found[FOUND_TMP]);
   heap_caps_free(found[FOUND_QUEUE]);
+  if (what != TIDY_NOTHING && !storage_hold()) {
+    // No card now. A .tmp left there is written over by the next save, or
+    // judged again at the next power-on; a queue whose file could not be
+    // finished is saved again when the card is back.
+    if (what == TIDY_FINISH) {
+      xSemaphoreTake(s_queue_lock, portMAX_DELAY);
+      file_is_stale();
+      bool retry = s_retry;
+      xSemaphoreGive(s_queue_lock);
+      if (retry) {
+        back_off();
+      }
+    }
+    return;
+  }
   if (what == TIDY_FINISH) {
     ESP_LOGW(TAG, "finishing a queue save that was interrupted");
     if (!replace_queue_file()) {
@@ -919,15 +954,13 @@ static void tidy(void) {
     ESP_LOGW(TAG, "discarding an unfinished queue save");
     unlink(TMP_PATH);
   }
+  if (what != TIDY_NOTHING) {
+    storage_release();
+  }
 }
 
-// Step 1 of a save, then the rest: `q` to the card. False, with the reason
-// logged, if the card does not now hold it under its proper name.
-static bool write_queue_file(const play_queue_t *q, uint32_t index) {
-  if (!storage_is_mounted()) {
-    ESP_LOGW(TAG, "no card: the queue was not saved");
-    return false;
-  }
+// write_queue_file's work, with the card held.
+static bool write_held(const play_queue_t *q, uint32_t index) {
   FILE *f = fopen(TMP_PATH, "wb");
   if (f == NULL && errno == ENOENT) {
     // A card that has never been scanned has no folder for it yet.
@@ -936,6 +969,7 @@ static bool write_queue_file(const play_queue_t *q, uint32_t index) {
   }
   if (f == NULL) {
     ESP_LOGW(TAG, "could not create the queue file (%s)", strerror(errno));
+    storage_report_failure();
     return false;
   }
   // No stdio buffer: see MEMORY DURING A SAVE.
@@ -946,10 +980,23 @@ static bool write_queue_file(const play_queue_t *q, uint32_t index) {
   bool closed = (fclose(f) == 0);
   if (!saved || !closed) {
     ESP_LOGW(TAG, "could not write the queue file (%s)", strerror(errno));
+    storage_report_failure();
     unlink(TMP_PATH); // do not leave half a file for the next start to read
     return false;
   }
   return replace_queue_file();
+}
+
+// Step 1 of a save, then the rest: `q` to the card. False, with the reason
+// logged, if the card does not now hold it under its proper name.
+static bool write_queue_file(const play_queue_t *q, uint32_t index) {
+  if (!storage_hold()) {
+    ESP_LOGW(TAG, "no card: the queue was not saved");
+    return false;
+  }
+  bool written = write_held(q, index);
+  storage_release();
+  return written;
 }
 
 // Write the queue file if a queue was handed over that it does not hold. A
@@ -1000,6 +1047,8 @@ static inline uint32_t get32(const uint8_t *p) {
          (uint32_t)p[3] << 24;
 }
 
+static void report_file(state_report_t *r, uint32_t tracks);
+
 static void report(state_report_t *r) {
   memset(r, 0, sizeof(*r));
   r->stack_free = uxTaskGetStackHighWaterMark(NULL);
@@ -1027,6 +1076,15 @@ static void report(state_report_t *r) {
     library_task_put();
   }
 
+  if (!storage_hold()) {
+    return; // no card: no file to report
+  }
+  report_file(r, tracks);
+  storage_release();
+}
+
+// The queue file's part of the report, with the card held.
+static void report_file(state_report_t *r, uint32_t tracks) {
   struct stat st;
   r->file_unfinished = (stat(TMP_PATH, &st) == 0);
   r->file = (stat(QUEUE_PATH, &st) == 0);
@@ -1084,12 +1142,20 @@ static bool clear(void) {
     s_flash_volume = s_flash_shuffle = s_flash_loop = s_flash_backlight = -1;
     s_flash_has_position = false;
   }
-  if (unlink(QUEUE_PATH) != 0 && errno != ENOENT) {
-    ESP_LOGW(TAG, "could not remove the queue file (%s)", strerror(errno));
+  if (!storage_hold()) {
+    ESP_LOGW(TAG, "no card: the queue file was not removed");
     ok = false;
-  }
-  if (unlink(TMP_PATH) != 0 && errno != ENOENT) {
-    ok = false;
+  } else {
+    if (unlink(QUEUE_PATH) != 0 && errno != ENOENT) {
+      ESP_LOGW(TAG, "could not remove the queue file (%s)", strerror(errno));
+      storage_report_failure();
+      ok = false;
+    }
+    if (unlink(TMP_PATH) != 0 && errno != ENOENT) {
+      storage_report_failure();
+      ok = false;
+    }
+    storage_release();
   }
   ESP_LOGI(TAG, "cleared");
   return ok;
@@ -1112,6 +1178,12 @@ bool state_task_clear(void) {
   xTaskNotify(s_task, REQUEST_CLEAR, eSetBits);
   xSemaphoreTake(s_answered, portMAX_DELAY);
   return s_cleared;
+}
+
+void state_task_card_back(void) {
+  if (s_task != NULL) {
+    xTaskNotify(s_task, REQUEST_CARD_BACK, eSetBits);
+  }
 }
 
 void state_task_card_ready(void) {
@@ -1180,6 +1252,13 @@ static void state_task(void *arg) {
     }
     if (request & REQUEST_TIDY) {
       tidy();
+    }
+    if ((request & REQUEST_CARD_BACK) && retry_waiting()) {
+      // A copy that could not be written while the card was away: due now
+      // (the back-off it had was for a card that was there and failing).
+      ESP_LOGI(TAG, "the card is back: saving the queue");
+      s_retry_armed = true;
+      s_failed_at = now - s_backoff;
     }
     if (request & REQUEST_CLEAR) {
       s_cleared = clear();

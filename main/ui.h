@@ -30,10 +30,21 @@ typedef struct {
 // caller should stop there.
 esp_err_t ui_start(ui_queues_t *queues);
 
-// Tell the UI whether start-up is still waiting for a card that mounts.
-// Called by the task that mounts the card: once with true if the first
-// attempt fails, once with false when a later one works.
+// Tell the UI whether the task that mounts the card is waiting for one that
+// mounts. Called by that task: with true if the first attempt at start-up
+// fails, with false when a later attempt works (at start-up, or after
+// ui_card_lost). It may wait for room in the UI's queue (the UI never waits
+// for it).
 void ui_card_waiting(bool waiting);
+
+// The card has stopped answering and is about to be unmounted (called by the
+// task that mounts the card, which then retries it and calls
+// ui_card_waiting(false) when it is back). The UI stops playback as ui_stop
+// does (the track stays on Now Playing, and D resumes it once the card is
+// back), shows "Card error" for 1.5 s and then "Insert SD card" over the
+// menus, and starts no track until the card is back. Returns at once, or
+// once there is room in the UI's queue.
+void ui_card_lost(void);
 
 // Stop playback, as a user of the player would want it stopped: the player
 // stops, the track stays on Now Playing as the one D starts (a queue track

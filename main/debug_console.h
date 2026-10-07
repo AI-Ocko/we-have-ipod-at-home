@@ -75,6 +75,20 @@
 //                            saved again when it next changes.
 //   queue [from [count]]     what the play queue holds; see below.
 //   pl ...                   the playlists in /playlists/; see below.
+//   card lost                test aid: as if a task had met a card failure
+//                            and the card had then not answered its status
+//                            command. The task that mounts the card does
+//                            what it does for a card pulled out (storage.h,
+//                            app_main.c): the UI stops playback and shows
+//                            "Card error", then "Insert SD card"; the card
+//                            is unmounted once nothing uses it, retried
+//                            every 2 seconds (the first retry finds it
+//                            there), and the index loaded again. Its log
+//                            lines are under the tag `dap`.
+//   card check               a card failure reported, so that the card is
+//                            asked whether it answers: it does, and the log
+//                            says `a card operation failed, but the card
+//                            answers`; nothing else happens.
 //
 // THE `lib` COMMANDS
 //
