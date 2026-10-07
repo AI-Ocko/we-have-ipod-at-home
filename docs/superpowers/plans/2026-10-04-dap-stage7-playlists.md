@@ -236,7 +236,7 @@ playlist_result_t playlist_edit(FILE *in, FILE *out, const library_t *lib,
 
 Required properties:
 - No allocation, no global state. `playlist_read` and `playlist_edit` read and write only in blocks (`fread`/`fwrite` of at least 4 KB, or the whole rest of the file if less); say how the work area is divided.
-- `playlist_read` takes the index's track count once and looks each line up with at most two `library_find_path` calls.
+- `playlist_read` takes the index's track count once and looks each line up with a bounded number of `library_find_path` calls: at most two for a relative line, at most seven for an absolute one (amended in the final review: an absolute path is retried with up to six leading folders removed).
 - `playlist_edit` APPEND counts the entries already in `in` and refuses with `PLAYLIST_FULL` before writing anything that would exceed the limit, or writes nothing it must take back (say which).
 - A track number at or above `library_track_count(lib)` in an APPEND is a programming error the function refuses with `PLAYLIST_NO_ENTRY`.
 - Fixtures are real files in `test/host/fixtures/playlists/` built against the existing `lib16.h` test library (read it; its paths are what the fixtures name). Bytes such as the BOM, CRLF and a missing final newline are written with escapes in a small generator or committed as binary-safe files; say which.

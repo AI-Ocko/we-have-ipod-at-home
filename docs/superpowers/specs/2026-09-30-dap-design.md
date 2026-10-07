@@ -474,8 +474,11 @@ to the playlist's folder, so that a computer opens the file too.
 Files made on a computer are accepted: a byte-order mark and CRLF endings are
 ignored; backslashes count as `/`; an absolute path (a leading `/`, a drive
 letter such as `E:`, or a `file://` URL with its `%XX` escapes decoded) is
-taken from the card root; a relative path is tried from the card root, then
-from `/playlists/`. Letter case is ignored, as the card's file system ignores
+taken from the card root, and if it matches nothing, again with its leading
+folders removed one at a time (up to six), so that a computer's mount point such
+as `/run/media/<user>/<card>/` or `/Volumes/<card>/` does not matter; a relative
+path is tried from the card root, then from `/playlists/`. Spaces and tabs at
+either end of a line are ignored. Letter case is ignored, as the card's file system ignores
 it.
 
 Entries are resolved against the index by path. Entries with no match are kept
@@ -501,7 +504,8 @@ up or down.
 
 Names: capitals, digits, space and `- ' & .`; 1 to 16 characters once spaces
 at either end are trimmed; must not end with `.` (the card's file system drops
-it) or start with `.` (such files are hidden and not listed); must not duplicate an existing playlist, ignoring case and the ending
+it) or start with `.` (such files are hidden and not listed); must not be a name Windows reserves (`CON`, `PRN`, `AUX`, `NUL`, `COM1`-`COM9`,
+`LPT1`-`LPT9`, in any case), which a computer could not open; must not duplicate an existing playlist, ignoring case and the ending
 (shows "Name in use"). Names of computer-made files are shown as they are.
 Limit: 1,000 entries per playlist; a computer-made file with more shows and
 plays its first 1,000 and keeps the rest.
