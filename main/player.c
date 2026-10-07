@@ -281,6 +281,7 @@
 #include "freertos/task.h"
 #include "id3.h"
 #include "mp3_xing.h"
+#include "multi_heap.h"
 #include "pcm.h"
 #include "player_status.h"
 #include <errno.h>
@@ -493,6 +494,130 @@ static esp_es_parse_err_t flac_parse_frame(esp_es_parse_raw_t *in,
     info->skipped_size = 0;
   }
   return err;
+}
+
+// ---- the codec's memory -----------------------------------------------------
+//
+// The codec library takes all its memory through four functions it defines
+// as weak symbols (media_lib_module_malloc, _calloc, _realloc and
+// media_lib_free); the versions here replace them. The library's own call
+// plain malloc, which puts a block of up to 16 KB in internal RAM wherever
+// there is room, falling back to PSRAM, and a larger one in PSRAM
+// (CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL). A stereo FLAC decoder takes about
+// 52 KB of internal RAM that way (its state, 8.4 KB; its bit reader, 8 KB;
+// one 16 KB residual array per channel; its output arrays are 16400 bytes
+// each and so are in PSRAM) and an MP3 decoder about 28 KB, all given back
+// when the track ends. Measured in the stage 8 soak (stage8-soak.md): while
+// a FLAC played, its two residual arrays took the middle of the largest free
+// block (47 KB) and left 14 KB, and with each track the decoder's memory
+// landed wherever there was room at that moment. Had there not been room it
+// would have gone to PSRAM without a word, and decoding from PSRAM is slow:
+// with all of the codec's memory there a 96 kHz 24-bit FLAC needs 97% of the
+// core instead of 60%.
+//
+// So the decoders' internal memory is a pool of their own, set aside once in
+// .bss: blocks of up to CODEC_POOL_MAX_BLOCK bytes come from it, larger ones
+// go to malloc (and so to PSRAM) as before. The pool is a private heap
+// (multi_heap). A decoder's blocks are always in internal RAM, the same RAM
+// for every track, and the general heap never sees them: its largest free
+// block is the same whichever format is playing. The pool holds one decoder
+// at a time, the largest being a stereo FLAC's. If the pool cannot serve a
+// request (a FLAC file whose encoder chose an unusually large block or
+// partition order) the request goes to malloc, as all of them did before.
+//
+// One exception: the parser's frame buffer ("ES_Parse" is the library's name
+// for its parser module, passed in `module`) is left to malloc. It grows to
+// the stream's largest frame (up to 16 KB of internal RAM; a larger one goes
+// to PSRAM), which would make the pool a third bigger for every format, and
+// it must not go to PSRAM: the parser reads it byte by byte looking for the
+// next frame header, and with it in PSRAM the FLAC files took 4% to 17%
+// more decoder time. If the library ever names its modules differently the
+// buffer simply comes from the pool when it fits.
+//
+// All codec calls are made by the decoder task, and the registrations by
+// player_start before that task exists, but the pool has its own spinlock
+// anyway (multi_heap_set_lock), held only for a TLSF operation.
+#define CODEC_POOL_BYTES (56 * 1024)
+#define CODEC_POOL_MAX_BLOCK 16384 // = CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL
+#define CODEC_PARSER_MODULE "ES_Parse"
+
+static uint8_t s_codec_pool_mem[CODEC_POOL_BYTES] __attribute__((aligned(8)));
+static multi_heap_handle_t s_codec_pool;
+static portMUX_TYPE s_codec_pool_lock = portMUX_INITIALIZER_UNLOCKED;
+
+// Set up the pool. Must come before anything else asks the library to do
+// anything (register_codecs allocates).
+static void codec_pool_init(void) {
+  s_codec_pool = multi_heap_register(s_codec_pool_mem, sizeof(s_codec_pool_mem));
+  if (s_codec_pool) {
+    multi_heap_set_lock(s_codec_pool, &s_codec_pool_lock);
+  } else {
+    ESP_LOGE(TAG, "Cannot set up the codec's memory pool");
+  }
+}
+
+static bool codec_in_pool(const void *p) {
+  return (const uint8_t *)p >= s_codec_pool_mem &&
+         (const uint8_t *)p < s_codec_pool_mem + sizeof(s_codec_pool_mem);
+}
+
+static bool codec_is_parser(const char *module) {
+  return module != NULL && strcmp(module, CODEC_PARSER_MODULE) == 0;
+}
+
+static void *codec_alloc(const char *module, size_t size) {
+  void *p = NULL;
+  if (s_codec_pool && size <= CODEC_POOL_MAX_BLOCK &&
+      !codec_is_parser(module)) {
+    p = multi_heap_malloc(s_codec_pool, size);
+  }
+  return p ? p : malloc(size);
+}
+
+void *media_lib_module_malloc(const char *module, size_t size) {
+  return codec_alloc(module, size);
+}
+
+void *media_lib_module_calloc(const char *module, size_t count, size_t size) {
+  if (size != 0 && count > SIZE_MAX / size) {
+    return NULL;
+  }
+  void *p = codec_alloc(module, count * size);
+  if (p) {
+    memset(p, 0, count * size);
+  }
+  return p;
+}
+
+void *media_lib_module_realloc(const char *module, void *p, size_t size) {
+  if (p == NULL) {
+    return codec_alloc(module, size);
+  }
+  if (!codec_in_pool(p)) {
+    return realloc(p, size); // from malloc, as the library's own would
+  }
+  if (size <= CODEC_POOL_MAX_BLOCK) {
+    void *q = multi_heap_realloc(s_codec_pool, p, size);
+    if (q || size == 0) {
+      return q;
+    }
+  }
+  // Too big for the pool now: move it out.
+  void *q = malloc(size);
+  if (q) {
+    size_t had = multi_heap_get_allocated_size(s_codec_pool, p);
+    memcpy(q, p, had < size ? had : size);
+    multi_heap_free(s_codec_pool, p);
+  }
+  return q;
+}
+
+void media_lib_free(void *p) {
+  if (codec_in_pool(p)) {
+    multi_heap_free(s_codec_pool, p);
+  } else {
+    free(p);
+  }
 }
 
 // Register the decoders. Never undone: the library's unregister call would
@@ -1665,6 +1790,7 @@ esp_err_t player_start(QueueHandle_t events) {
   }
   dec_t *d = &s_dec;
   s_events = events;
+  codec_pool_init();
   register_codecs();
 
   // The ring's storage is in PSRAM. One byte more than the capacity: a stream
@@ -1814,6 +1940,11 @@ void player_get_status(player_status_t *out) {
   if (s_decoder_task) {
     out->decoder_stack_free = uxTaskGetStackHighWaterMark(s_decoder_task);
     out->output_stack_free = uxTaskGetStackHighWaterMark(s_output_task);
+  }
+  if (s_codec_pool) {
+    out->codec_pool_size = sizeof(s_codec_pool_mem);
+    out->codec_pool_free = multi_heap_free_size(s_codec_pool);
+    out->codec_pool_free_min = multi_heap_minimum_free_size(s_codec_pool);
   }
 }
 

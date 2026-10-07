@@ -56,6 +56,13 @@ typedef struct {
   // Bytes of each task's stack that have never been used.
   uint32_t decoder_stack_free;
   uint32_t output_stack_free;
+
+  // The codec's memory pool (internal RAM set aside at start-up for the
+  // decoders; see "the codec's memory" in player.c): its size, the bytes
+  // free now, and the least that has been free since start-up.
+  uint32_t codec_pool_size;
+  uint32_t codec_pool_free;
+  uint32_t codec_pool_free_min;
 } player_status_t;
 
 void player_get_status(player_status_t *out);

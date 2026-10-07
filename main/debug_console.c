@@ -250,7 +250,8 @@ static const char *cmd_stat(void) {
   ESP_LOGI(TAG,
            "stat state=%s pos_ms=%u vol=%d fill=%u low=%d underruns=%u "
            "wall_ms=%u dec_busy_ms=%u out_busy_ms=%u dec_stack_free=%u "
-           "out_stack_free=%u heap_int=%u heap_int_largest=%u "
+           "out_stack_free=%u codec_pool=%u codec_pool_free=%u "
+           "codec_pool_min=%u heap_int=%u heap_int_largest=%u "
            "heap_data=%u heap_data_largest=%u heap_data_min=%u psram=%u "
            "psram_largest=%u "
            "ui_stack_free=%u ui_passes=%u ui_lcd=%u ui_light=%s "
@@ -259,7 +260,8 @@ static const char *cmd_stat(void) {
            (unsigned)s.ring_fill, (int)s.ring_low, (unsigned)s.underruns,
            (unsigned)s.wall_ms, (unsigned)s.decoder_busy_ms,
            (unsigned)s.output_busy_ms, (unsigned)s.decoder_stack_free,
-           (unsigned)s.output_stack_free,
+           (unsigned)s.output_stack_free, (unsigned)s.codec_pool_size,
+           (unsigned)s.codec_pool_free, (unsigned)s.codec_pool_free_min,
            (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
            (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
            (unsigned)heap_caps_get_free_size(DATA_RAM),
