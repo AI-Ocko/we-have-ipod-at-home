@@ -9,6 +9,7 @@
 #include "libscan.h"
 #include "player.h"
 #include "player_status.h"
+#include "playlist_task.h"
 #include "state_task.h"
 #include "ui.h"
 #include <ctype.h>
@@ -30,6 +31,12 @@
 #define HOLD_MAX_REPEATS 2000
 // How long `hold` waits for room in the key queue before it gives up.
 #define HOLD_ROOM_WAIT_MS 1000
+// How long a `pl` command waits for the playlist task's answer: an edit of
+// a 1,000-entry playlist takes well under a second, but the UI's requests
+// may be ahead of it in the queue.
+#define PL_WAIT_MS 15000
+#define PL_CAT_WIDTH 200 // characters of a `pl cat` line per log line
+_Static_assert(PL_CAT_WIDTH + 8 <= PLAYLIST_FILE_MAX + 1, "a pl cat line fits");
 
 static const char KEY_CHARS[] = "123A456B789C*0#D";
 
@@ -556,6 +563,393 @@ static const char *cmd_state(char *args) {
   return NULL;
 }
 
+// --- `pl`: playlists ----------------------------------------------------------
+//
+// Every `pl` command goes through the playlist task's requests, as the UI's
+// do, with PLAYLIST_CLIENT_CONSOLE: its events come to the console's own
+// queue (playlist_task_wait), so it never takes one meant for the UI, and
+// it never touches the card itself. A playlist is named by its number in
+// the catalog, which each command lists afresh. The results are copied into
+// the console's own buffers, in PSRAM, allocated once at start.
+
+typedef struct {
+  playlist_catalog_t catalog;
+  playlist_loaded_t loaded; // also the tracks a command parses
+  playlist_bytes_t bytes;
+  char file[PLAYLIST_FILE_MAX + 1]; // the playlist a command names
+  char text[PLAYLIST_FILE_MAX + 1]; // a name for `pl ls`, a line for `pl cat`
+} pl_memory_t;
+static pl_memory_t *s_pl;
+
+// Wait for request `request` (0: it was refused) and log its event. NULL if
+// it ended done, or why not.
+static const char *pl_wait(uint32_t request) {
+  if (request == 0) {
+    return "busy: the playlist task cannot take a request";
+  }
+  playlist_event_t e;
+  if (!playlist_task_wait(request, &e, PL_WAIT_MS)) {
+    return "the playlist task did not answer";
+  }
+  static const char *const NAME[] = {"ok", "empty", "too long", "bad char",
+                                     "bad end", "bad start"};
+  if (e.outcome == PLAYLIST_TASK_BAD_NAME) {
+    ESP_LOGI(TAG, "pl event request=%" PRIu32 " kind=%s outcome=%s name=%s",
+             e.request, playlist_task_request_name(e.kind),
+             playlist_task_outcome_name(e.outcome),
+             e.name < sizeof(NAME) / sizeof(NAME[0]) ? NAME[e.name] : "?");
+  } else {
+    ESP_LOGI(TAG, "pl event request=%" PRIu32 " kind=%s outcome=%s",
+             e.request, playlist_task_request_name(e.kind),
+             playlist_task_outcome_name(e.outcome));
+  }
+  return e.outcome == PLAYLIST_TASK_DONE
+             ? NULL
+             : playlist_task_outcome_name(e.outcome);
+}
+
+// The catalog, listed now, into &s_pl->catalog.
+static const char *pl_list(void) {
+  uint32_t request = playlist_task_list(PLAYLIST_CLIENT_CONSOLE);
+  const char *why = pl_wait(request);
+  if (why == NULL &&
+      !playlist_task_copy_catalog(PLAYLIST_CLIENT_CONSOLE, request,
+                                  &s_pl->catalog)) {
+    why = "the listing was replaced before it was copied";
+  }
+  return why;
+}
+
+// The next word of `*args` (cut off with a '\0'), or "" at the end.
+static char *next_word(char **args) {
+  char *word = skip_spaces(*args);
+  char *end = word;
+  while (*end != '\0' && *end != ' ' && *end != '\t') {
+    end++;
+  }
+  if (*end != '\0') {
+    *end++ = '\0';
+  }
+  *args = end;
+  return word;
+}
+
+// Playlist number <n>, the next word: its file name into s_pl->file.
+static const char *pl_file(char **args) {
+  long long n;
+  char *word = next_word(args);
+  if (!all_digits(word) || !parse_number(word, &n)) {
+    return "expected a playlist number (see pl ls)";
+  }
+  const char *why = pl_list();
+  if (why != NULL) {
+    return why;
+  }
+  if (n >= s_pl->catalog.count) {
+    return "no such playlist";
+  }
+  strlcpy(s_pl->file, playlist_catalog_file(&s_pl->catalog, (uint32_t)n),
+          sizeof(s_pl->file));
+  return NULL;
+}
+
+// Track numbers, the rest of the line, into s_pl->loaded.tracks.
+static const char *pl_tracks(char *args, uint32_t *count) {
+  *count = 0;
+  for (char *word = next_word(&args); *word != '\0';
+       word = next_word(&args)) {
+    long long t;
+    if (!all_digits(word) || !parse_number(word, &t) || t >= UINT16_MAX) {
+      return "expected track numbers";
+    }
+    if (*count == PLAYLIST_ENTRIES_MAX) {
+      return "too many tracks";
+    }
+    s_pl->loaded.tracks[(*count)++] = (uint16_t)t;
+  }
+  return NULL;
+}
+
+// The checksum of the index now loaded (0 if none: the task then answers
+// library busy).
+static uint32_t pl_index(void) {
+  const library_t *lib = library_task_get();
+  uint32_t index = library_checksum(lib);
+  if (lib != NULL) {
+    library_task_put();
+  }
+  return index;
+}
+
+// An entry number, the next word.
+static bool pl_entry(char **args, uint32_t *entry) {
+  long long n;
+  char *word = next_word(args);
+  if (!all_digits(word) || !parse_number(word, &n) || n > UINT32_MAX) {
+    return false;
+  }
+  *entry = (uint32_t)n;
+  return true;
+}
+
+// A name: in double quotes, or the words up to `stop_at_digits` (the first
+// word made of digits only) or the end.
+static char *pl_name(char **args, bool stop_at_digits) {
+  char *s = skip_spaces(*args);
+  if (*s == '"') {
+    char *end = strchr(s + 1, '"');
+    if (end == NULL) {
+      *args = s + strlen(s);
+      return s + 1;
+    }
+    *end = '\0';
+    *args = end + 1;
+    return s + 1;
+  }
+  char *name = s;
+  char *p = s;
+  while (*p != '\0') {
+    char *word = skip_spaces(p);
+    char *end = word;
+    while (*end != '\0' && *end != ' ' && *end != '\t') {
+      end++;
+    }
+    bool digits = end > word;
+    for (char *q = word; q < end; q++) {
+      digits = digits && isdigit((unsigned char)*q);
+    }
+    if (stop_at_digits && digits && word != name) {
+      if (p > name) {
+        *p = '\0'; // the space before the first number
+      }
+      *args = word;
+      return name;
+    }
+    p = end;
+  }
+  *args = p;
+  return name;
+}
+
+static const char *pl_ls(void) {
+  const char *why = pl_list();
+  if (why != NULL) {
+    return why;
+  }
+  char *name = s_pl->text;
+  for (uint32_t i = 0; i < s_pl->catalog.count; i++) {
+    playlist_catalog_name(&s_pl->catalog, i, name, sizeof(s_pl->text));
+    ESP_LOGI(TAG, "pl %" PRIu32 " \"%s\" file=\"%s\"", i, name,
+             playlist_catalog_file(&s_pl->catalog, i));
+  }
+  ESP_LOGI(TAG, "pl playlists=%" PRIu32 "%s", s_pl->catalog.count,
+           s_pl->catalog.truncated ? " truncated" : "");
+  return NULL;
+}
+
+static const char *pl_show(char *args) {
+  const char *why = pl_file(&args);
+  if (why != NULL) {
+    return why;
+  }
+  uint32_t request = playlist_task_load(PLAYLIST_CLIENT_CONSOLE, s_pl->file);
+  why = pl_wait(request);
+  if (why != NULL) {
+    return why;
+  }
+  if (!playlist_task_copy_load(PLAYLIST_CLIENT_CONSOLE, request,
+                               &s_pl->loaded)) {
+    return "the load was replaced before it was copied";
+  }
+  // The numbers go with the paths only if the index is still the one the
+  // load used. It is held for one path at a time, not across the printing.
+  for (uint32_t i = 0; i < s_pl->loaded.count; i++) {
+    uint16_t t = s_pl->loaded.tracks[i];
+    if (t == PLAYLIST_MISSING) {
+      ESP_LOGI(TAG, "pl entry %" PRIu32 " missing", i);
+      continue;
+    }
+    const library_t *lib = library_task_get();
+    bool same = lib != NULL && library_checksum(lib) == s_pl->loaded.index;
+    if (same) {
+      library_track_path(lib, t, s_path, sizeof(s_path));
+    }
+    if (lib != NULL) {
+      library_task_put();
+    }
+    ESP_LOGI(TAG, "pl entry %" PRIu32 " track=%u path=\"%s\"", i, (unsigned)t,
+             same ? s_path : "?");
+  }
+  ESP_LOGI(TAG, "pl entries=%" PRIu32 " index=%08" PRIx32 "%s",
+           s_pl->loaded.count, s_pl->loaded.index,
+           s_pl->loaded.truncated ? " truncated" : "");
+  return NULL;
+}
+
+// `pl cat`: one output line per line of the file; see debug_console.h.
+static void pl_cat_flush(char *text, size_t *len, uint32_t line,
+                         const char *after) {
+  text[*len] = '\0';
+  ESP_LOGI(TAG, "pl cat %" PRIu32 " \"%s\"%s", line, text, after);
+  *len = 0;
+}
+
+static const char *pl_cat(char *args) {
+  const char *why = pl_file(&args);
+  if (why != NULL) {
+    return why;
+  }
+  char *text = s_pl->text; // PL_CAT_WIDTH and one escape fit
+  size_t len = 0;
+  uint32_t line = 0, offset = 0, size = 0;
+  bool open_line = false; // bytes of a line not yet ended by an LF
+  do {
+    uint32_t request =
+        playlist_task_read(PLAYLIST_CLIENT_CONSOLE, s_pl->file, offset);
+    why = pl_wait(request);
+    if (why != NULL) {
+      return why;
+    }
+    if (!playlist_task_copy_bytes(PLAYLIST_CLIENT_CONSOLE, request,
+                                  &s_pl->bytes)) {
+      return "the read was replaced before it was copied";
+    }
+    size = s_pl->bytes.size;
+    for (uint32_t i = 0; i < s_pl->bytes.length; i++) {
+      unsigned char c = s_pl->bytes.bytes[i];
+      if (c == '\n') {
+        pl_cat_flush(text, &len, line++, "");
+        open_line = false;
+        continue;
+      }
+      open_line = true;
+      if (len >= PL_CAT_WIDTH) {
+        pl_cat_flush(text, &len, line, " more");
+      }
+      if (c == '\\' || c == '"') {
+        len += (size_t)snprintf(text + len, 8, "\\%c", c);
+      } else if (c == '\r') {
+        len += (size_t)snprintf(text + len, 8, "\\r");
+      } else if (c == '\t') {
+        len += (size_t)snprintf(text + len, 8, "\\t");
+      } else if (c < 0x20 || c > 0x7e) {
+        len += (size_t)snprintf(text + len, 8, "\\x%02X", c);
+      } else {
+        text[len++] = (char)c;
+      }
+    }
+    offset += s_pl->bytes.length;
+    if (s_pl->bytes.length == 0) {
+      break; // the file shrank under us
+    }
+  } while (offset < size);
+  if (open_line) {
+    pl_cat_flush(text, &len, line++, " nolf");
+  }
+  ESP_LOGI(TAG, "pl cat bytes=%" PRIu32 " lines=%" PRIu32, size, line);
+  return NULL;
+}
+
+static const char *pl_new(char *args) {
+  char *name = pl_name(&args, true);
+  uint32_t count;
+  const char *why = pl_tracks(args, &count);
+  if (why != NULL) {
+    return why;
+  }
+  return pl_wait(playlist_task_create(PLAYLIST_CLIENT_CONSOLE, name,
+                                      s_pl->loaded.tracks, count, pl_index()));
+}
+
+static const char *pl_add(char *args) {
+  const char *why = pl_file(&args);
+  if (why != NULL) {
+    return why;
+  }
+  uint32_t count;
+  why = pl_tracks(args, &count);
+  if (why != NULL) {
+    return why;
+  }
+  if (count == 0) {
+    return "expected track numbers";
+  }
+  return pl_wait(playlist_task_append(PLAYLIST_CLIENT_CONSOLE, s_pl->file,
+                                      s_pl->loaded.tracks, count,
+                                      pl_index()));
+}
+
+// `pl rm`, `pl up`, `pl down`.
+static const char *pl_entry_edit(char *args, playlist_request_t kind) {
+  const char *why = pl_file(&args);
+  if (why != NULL) {
+    return why;
+  }
+  uint32_t entry;
+  if (!pl_entry(&args, &entry) || *skip_spaces(args) != '\0') {
+    return "expected a playlist number and an entry number";
+  }
+  uint32_t request =
+      kind == PLAYLIST_REQUEST_REMOVE
+          ? playlist_task_remove(PLAYLIST_CLIENT_CONSOLE, s_pl->file, entry)
+      : kind == PLAYLIST_REQUEST_MOVE_UP
+          ? playlist_task_move_up(PLAYLIST_CLIENT_CONSOLE, s_pl->file, entry)
+          : playlist_task_move_down(PLAYLIST_CLIENT_CONSOLE, s_pl->file, entry);
+  return pl_wait(request);
+}
+
+static const char *pl_mv(char *args) {
+  const char *why = pl_file(&args);
+  if (why != NULL) {
+    return why;
+  }
+  char *name = pl_name(&args, false);
+  return pl_wait(playlist_task_rename(PLAYLIST_CLIENT_CONSOLE, s_pl->file, name));
+}
+
+static const char *pl_del(char *args) {
+  const char *why = pl_file(&args);
+  if (why != NULL) {
+    return why;
+  }
+  if (*skip_spaces(args) != '\0') {
+    return "expected a playlist number";
+  }
+  return pl_wait(playlist_task_delete(PLAYLIST_CLIENT_CONSOLE, s_pl->file));
+}
+
+static const char *cmd_pl(char *args) {
+  if (s_pl == NULL) {
+    return "no memory for the pl commands";
+  }
+  char *sub = next_word(&args);
+  if (strcmp(sub, "ls") == 0 && *skip_spaces(args) == '\0') {
+    return pl_ls();
+  } else if (strcmp(sub, "show") == 0) {
+    return pl_show(args);
+  } else if (strcmp(sub, "cat") == 0) {
+    return pl_cat(args);
+  } else if (strcmp(sub, "new") == 0) {
+    return pl_new(args);
+  } else if (strcmp(sub, "add") == 0) {
+    return pl_add(args);
+  } else if (strcmp(sub, "rm") == 0) {
+    return pl_entry_edit(args, PLAYLIST_REQUEST_REMOVE);
+  } else if (strcmp(sub, "up") == 0) {
+    return pl_entry_edit(args, PLAYLIST_REQUEST_MOVE_UP);
+  } else if (strcmp(sub, "down") == 0) {
+    return pl_entry_edit(args, PLAYLIST_REQUEST_MOVE_DOWN);
+  } else if (strcmp(sub, "mv") == 0) {
+    return pl_mv(args);
+  } else if (strcmp(sub, "del") == 0) {
+    return pl_del(args);
+  }
+  return "expected: pl ls | pl show <n> | pl cat <n> | pl new <name> "
+         "[track ...] | pl add <n> <track> [track ...] | pl rm <n> <entry> | "
+         "pl up <n> <entry> | pl down <n> <entry> | pl mv <n> <name> | "
+         "pl del <n>";
+}
+
 // The screen shows the player's state but is redrawn only when the UI task
 // has something to handle. A key event with no key makes it look again, so
 // that a change made from here shows up.
@@ -615,6 +1009,8 @@ static void run_line(const char *line) {
     why = cmd_state(args);
   } else if (strcmp(word, "queue") == 0) {
     why = cmd_queue(args);
+  } else if (strcmp(word, "pl") == 0) {
+    why = cmd_pl(args);
   } else {
     why = "unknown command";
   }
@@ -691,6 +1087,10 @@ esp_err_t debug_console_start(QueueHandle_t key_events) {
     return ESP_ERR_INVALID_ARG;
   }
   s_key_events = key_events;
+
+  // The `pl` commands' copies of the playlist task's results (about 24 KB,
+  // in PSRAM). Without them those commands say so; the rest works.
+  s_pl = heap_caps_malloc(sizeof(*s_pl), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
 
   // Only receiving goes through the driver. The log keeps writing to the same
   // UART directly, as before; no transmit buffer is asked for, so the driver

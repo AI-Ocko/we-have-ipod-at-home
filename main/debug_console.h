@@ -57,6 +57,7 @@
 //                            running player holds is not changed, and is
 //                            saved again when it next changes.
 //   queue [from [count]]     what the play queue holds; see below.
+//   pl ...                   the playlists in /playlists/; see below.
 //
 // THE `lib` COMMANDS
 //
@@ -145,6 +146,66 @@
 //
 // The command waits for the UI task, which answers at the end of its next
 // pass: `err queue: the UI task did not answer` after a second without one.
+//
+// THE `pl` COMMANDS
+//
+// They go through the playlist task (playlist_task.h) with the same
+// requests the UI makes, as its client PLAYLIST_CLIENT_CONSOLE: the console
+// never touches the card itself, and never takes an event meant for the
+// UI. <n> is a playlist's number in the catalog (the folder's playlists, A
+// to Z, as `pl ls` prints them), which each command lists afresh, so the
+// numbers stay right as playlists come and go. <entry> counts from 0, in
+// file order. <track> is a track's number in the index (as in the `lib`
+// lines). Each prints, in exactly these forms:
+//
+//   pl ls                    pl <n> "<name>" file="<file name>"
+//                            pl playlists=<count>[ truncated]
+//   pl show <n>              pl entry <entry> track=<#> path="<path>"
+//                            pl entry <entry> missing
+//                            pl entries=<count> index=<8 hex>[ truncated]
+//   pl cat <n>               pl cat <line> "<text>"[ more| nolf]
+//                            pl cat bytes=<n> lines=<n>
+//   pl new <name> [track ...]
+//   pl add <n> <track> [track ...]
+//   pl rm <n> <entry>
+//   pl up <n> <entry>
+//   pl down <n> <entry>
+//   pl mv <n> <name>
+//   pl del <n>
+//
+// and every request the command makes logs its event first:
+//
+//   pl event request=<number> kind=<kind> outcome=<outcome>[ name=<why>]
+//
+// <kind> is list, load, create, append, remove, move_up, move_down,
+// rename, delete or read; <outcome> is done, name in use, bad name,
+// playlist full, no such entry, bad file, card error, library busy or
+// stale index; `name=` follows `bad name` and is empty, too long, bad
+// char, bad end or bad start. The command answers `ok ...` if its last
+// request ended done, otherwise `err ...: <outcome>`.
+//
+// `pl ls`: `truncated` says the folder has more playlists than the catalog
+// holds (PLAYLIST_CATALOG_MAX). `pl show`: `path` is the track's path in
+// the index (the form `lib` prints), `?` if the index changed since the
+// load; an entry no track matches is `missing`. `index` is the checksum of
+// the index the entries were resolved against, `truncated` that the file
+// has more than 1,000 entries and these are the first 1,000. `pl cat`
+// prints the file's bytes, one log line per line of the file (an LF ends a
+// line and is not shown); `\r` is a CR, `\t` a tab, `\\` and `\"` a
+// backslash and a double quote, and any other byte below 0x20 or above
+// 0x7E is `\xHH` (so a UTF-8 byte-order mark is `\xEF\xBB\xBF`). A line
+// longer than 200 characters as printed goes on in further log lines with
+// the same number, each but the last marked ` more`; a last line with no LF
+// after it is marked ` nolf`.
+//
+// <name> in `pl new` is in double quotes, or the words before the first
+// word made of digits only (so `pl new ROAD TRIP 3 7` makes "ROAD TRIP"
+// with tracks 3 and 7; a name with a number for a word needs the quotes:
+// `pl new "MIX 2" 3 7`). In `pl mv` it is the rest of the line, quotes
+// optional. The playlist task checks it (spaces at either end are
+// trimmed). Each command waits up to 15 s for each of its answers: `err
+// ...: the playlist task did not answer` after that; `err ...: busy: the
+// playlist task cannot take a request` if its request queue is full.
 //
 // The path of `play` is everything after the command word, spaces included,
 // with spaces at either end removed. If the last word of the line is made of

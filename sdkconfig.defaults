@@ -33,3 +33,10 @@ CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y
 # that buffer's old contents a second time (measured: one late interrupt per
 # page erase; none with this option). It adds about 700 bytes to the firmware.
 CONFIG_I2S_ISR_IRAM_SAFE=y
+
+# Lets a task's stack be in PSRAM when the task is created with one there
+# (xTaskCreatePinnedToCoreWithCaps). Only the playlist task does so: it never
+# writes flash, so its stack is never touched while the flash cache is off,
+# and this chip revision (3) has no PSRAM cache bug for ROM code to trip on.
+# It saves 6 KB of internal RAM. Other tasks still get internal stacks.
+CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM=y

@@ -8,6 +8,7 @@
 #include "library_task.h"
 #include "pins.h"
 #include "player.h"
+#include "playlist_task.h"
 #include "state_task.h"
 #include "storage.h"
 #include "ui.h"
@@ -127,6 +128,11 @@ void app_main(void) {
   // The library is optional too: without its memory the player still plays
   // whatever it is told to (library_task_start has said why in the log).
   library_task_start(s_queues.library_status);
+
+  // Playlists are optional in the same way. Nothing reads the UI's side of
+  // their events yet, so the UI's events are dropped (NULL): only the
+  // console's `pl` commands use the task for now.
+  playlist_task_start(NULL);
 
   wait_for_card();
 
