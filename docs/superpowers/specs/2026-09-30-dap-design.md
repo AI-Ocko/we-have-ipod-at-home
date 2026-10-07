@@ -607,9 +607,29 @@ saves, `C` cancels. A, B and D keep their global meaning.
 
 ### Backlight and sleep
 
-Any key press while the backlight is off turns it on and is otherwise ignored.
-The sleep timer, when it expires, fades out, stops playback and turns the
-backlight off; it then resets to off.
+Any key press while the backlight is off turns it on and is otherwise ignored,
+including that key's long press, repeats and release. Nothing else turns it on.
+The backlight setting is saved; the sleep timer is not.
+
+The sleep timer counts from when it is chosen. When it expires during playback
+the volume fades to silence over 10 seconds, playback stops as a stop does (the
+track stays on Now Playing and D resumes it), the volume returns to its setting
+(the fade is never saved) and the backlight goes off; with nothing playing it
+only turns the backlight off. A key press during the fade cancels it. It then
+resets to off. (Amended in stage 8.)
+
+Settings shows both as rows with their values (`Backlight: 30 s`, `Sleep: off`,
+`Sleep: 27 min` for the minutes left); 5 or 6 on a row moves to the next value.
+About shows the track count on the top row and the card's free space and the
+firmware build date as a marquee on the bottom row.
+
+### Fast-forward and rewind
+
+Holding 6 (or 4) on Now Playing moves a target time forward (or back): 2 s per
+key repeat for the first 2 s after the long press, then 5 s per repeat. The
+bottom row shows `>>` (or `<<`) and the target while the key is held; on release
+playback jumps there with one seek, and a paused track stays paused. The target
+stops at 0:00 and one second before the end. (Amended in stage 8.)
 
 ## 10. Settings and resume
 
