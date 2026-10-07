@@ -487,7 +487,10 @@ An entry is its path line together with the comment lines before it (such as
 entries and keep every other byte of the file as it was.
 
 Every edit is saved immediately by writing `<name>.m3u.tmp` and putting it in
-place with the same power-cut care as the index. All reading and writing of
+place with the same power-cut care as the index. (Known limit, accepted in stage 7: FAT renames by writing
+the new name before removing the old one, so a power cut in the few milliseconds between can leave two
+names sharing the same space on the card; tidying then frees space the playlist still uses. A computer's
+disk check repairs it. The index has the same window.) All reading and writing of
 playlists is done by a separate low-priority task, so the interface never
 waits on the card.
 
@@ -634,7 +637,7 @@ If the index has changed since, the queue starts empty.
 | Index missing, corrupt or wrong version | Automatic rescan |
 | Index memory cap reached | Stop scan, keep partial index, "Library full" |
 | Playlist entry not in index | Kept in file, shown "(missing)", skipped |
-| Allocation failure at start-up | Message on LCD and serial log; halt |
+| Allocation failure at start-up | For the UI: message on LCD and serial log; halt. For a background task (library, saved state, playlists): logged, and the player runs without that feature (amended in stage 7, as stages 4 and 6 built it) |
 | LCD not found at 0x27 or 0x3F | Logged on serial; player runs without a screen |
 
 No `ESP_ERROR_CHECK` on anything that can fail at run time because of the card
