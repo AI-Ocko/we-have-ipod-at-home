@@ -392,9 +392,9 @@ Board checks (the agent cannot pull the card; a committed console command `card 
 On a phone charger or a power bank.
 
 1. **Backlight:** leave it alone 30 s: the backlight goes off. Press `6` on Now Playing: the light comes on and the track does not change. In Settings, try each `Backlight` value; unplug and replug: it is kept.
-2. **Sleep timer:** set `Sleep: 15 min` while music plays: at the end the music fades out over about 10 seconds and stops, and the light goes off; `D` carries on from there at your normal volume. Press a key during a fade: it stops fading.
+2. **Sleep timer:** set `Sleep: 15 min` while music plays: at the end the music fades out over about 10 seconds and stops, and the light goes off; `D` carries on from there at your normal volume (the screen is dark by then, so the first key press only lights it; press `D` again). Press a key during a fade: it stops fading.
 3. **Fast-forward and rewind:** hold `6` on Now Playing: the time races forward, faster after two seconds, and playback jumps there when you let go. Hold `4` to go back. A quick tap still skips.
 4. **About:** shows the number of tracks, free space on the card and the build date.
-5. **Card out and back:** while music plays, pull the SD card: the screen says `Card error`, then `Insert SD card`; push it back in: the player carries on (press `D` to resume) with no reset.
+5. **Card out and back:** while music plays, pull the SD card: the screen says `Card error`, then `Insert SD card`; push it back in: the player carries on (press `D` to resume; if the screen has gone dark, the first press only lights it) with no reset. Try it once while playing and once while paused.
 6. **An hour of play:** play for an hour or more with loop all: no dropouts, clicks or buzz.
 7. **The guide:** read `docs/USER_GUIDE.md`: it matches what the player does.
