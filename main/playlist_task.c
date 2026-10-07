@@ -1076,10 +1076,11 @@ static playlist_outcome_t do_rename(const request_t *r,
   const char *ending = file + len - ending_length(file, len);
   snprintf(s_mem->new_path, PATH_BYTES, "%s/%s%s", DIR_PATH, name, ending);
   if (rename(s_mem->path, s_mem->new_path) != 0) {
-    ESP_LOGW(TAG, "could not rename %s (%s)", file, strerror(errno));
-    return errno == ENOENT   ? PLAYLIST_TASK_NO_ENTRY
-           : errno == EEXIST ? PLAYLIST_TASK_NAME_IN_USE
-                             : PLAYLIST_TASK_CARD_ERROR;
+    int err = errno; // before the log, which may change it
+    ESP_LOGW(TAG, "could not rename %s (%s)", file, strerror(err));
+    return err == ENOENT   ? PLAYLIST_TASK_NO_ENTRY
+           : err == EEXIST ? PLAYLIST_TASK_NAME_IN_USE
+                           : PLAYLIST_TASK_CARD_ERROR;
   }
   return PLAYLIST_TASK_DONE;
 }
@@ -1090,9 +1091,9 @@ static playlist_outcome_t do_delete(const request_t *r) {
     return outcome;
   }
   if (unlink(s_mem->path) != 0) {
-    ESP_LOGW(TAG, "could not delete %s (%s)", request_file(r),
-             strerror(errno));
-    return errno == ENOENT ? PLAYLIST_TASK_NO_ENTRY : PLAYLIST_TASK_CARD_ERROR;
+    int err = errno; // before the log, which may change it
+    ESP_LOGW(TAG, "could not delete %s (%s)", request_file(r), strerror(err));
+    return err == ENOENT ? PLAYLIST_TASK_NO_ENTRY : PLAYLIST_TASK_CARD_ERROR;
   }
   return PLAYLIST_TASK_DONE;
 }

@@ -66,7 +66,11 @@
 // A move or a remove changes the UI's copy of the entries at once, as soon
 // as the request is accepted, so that ten Move ups pressed in a row are ten
 // moves on the screen without waiting for the card. Should one fail, the
-// playlist is loaded again from the card: what it holds is the truth. A load
+// playlist is loaded again from the card: what it holds is the truth. Until
+// that load's entries are in hand the copy's entry numbers may name other
+// entries in the file, so moves and removes are refused ("Busy"); if the
+// task refused the load itself, it is asked for again after every key and
+// event (ui_pl_retry_reload) until it is taken. A load
 // that was served before edits the UI has sent since would undo them on
 // the screen, so it is not used: it is asked for again (one more load, after
 // those edits). Request numbers of one caller increase (playlist_task.c),
@@ -115,6 +119,8 @@ ui_overlay_t ui_name_overlay(playlist_name_t why) {
     return UI_OVERLAY_BAD_END;
   case PLAYLIST_NAME_BAD_START:
     return UI_OVERLAY_BAD_START;
+  case PLAYLIST_NAME_RESERVED:
+    return UI_OVERLAY_NAME_RESERVED;
   case PLAYLIST_NAME_OK:
     break;
   }
@@ -282,6 +288,27 @@ static void reload(ui_t *ui, int64_t now_us) {
   }
 }
 
+// The copy is known to differ from the file (an edit failed) and the load
+// that puts it right was refused: ask again, quietly.
+void ui_pl_retry_reload(ui_t *ui) {
+  ui_pl_t *pl = ui->pl;
+  if (pl->reload_failed && pl->load_request == 0 && pl->open_file[0] != '\0') {
+    send_load(ui);
+  }
+}
+
+// Whether a move or a remove must wait: the copy is known to differ from the
+// file, so its entry numbers may name other entries there. "Busy", and the
+// load asked for again if it was refused.
+static bool copy_wrong(ui_t *ui, int64_t now_us) {
+  if (!ui->pl->reload_failed) {
+    return false;
+  }
+  ui_pl_retry_reload(ui);
+  say(ui, UI_OVERLAY_BUSY, now_us);
+  return true;
+}
+
 // A free slot for an edit, or NULL (none: the edit is refused as "Busy";
 // the playlist task's queue would be nearly as full).
 static ui_edit_t *edit_slot(ui_t *ui) {
@@ -404,7 +431,8 @@ static void move_entry(ui_t *ui, int step, int64_t now_us) {
   // A playlist cut at 1,000 has entries past the copy: the menu can be on
   // one of them (moved down from the last entry shown), and a move there
   // is the file's to make.
-  if (!pl->open_loaded || (entry >= count && !cut)) {
+  if (!pl->open_loaded || (entry >= count && !cut) ||
+      copy_wrong(ui, now_us)) {
     return;
   }
   // At either end the move does nothing.
@@ -449,7 +477,8 @@ static void move_entry(ui_t *ui, int step, int64_t now_us) {
 static void remove_entry(ui_t *ui, int64_t now_us) {
   ui_pl_t *pl = ui->pl;
   uint32_t entry = ui->options_target.index;
-  if (!pl->open_loaded || (entry >= pl->open.count && !pl->open.truncated)) {
+  if (!pl->open_loaded || (entry >= pl->open.count && !pl->open.truncated) ||
+      copy_wrong(ui, now_us)) {
     return;
   }
   ui_edit_t *slot = edit_slot(ui);
@@ -476,7 +505,7 @@ static void remove_entry(ui_t *ui, int64_t now_us) {
   ui_options_close(ui);
 }
 
-// --- options -------------------------------------------------------------------
+// --- options -----------------------------------------------------------------
 
 void ui_pl_options_opened(ui_t *ui) {
   ui_pl_t *pl = ui->pl;
@@ -567,7 +596,8 @@ static void save_queue(ui_t *ui, int64_t now_us) {
     say(ui, UI_OVERLAY_QUEUE_EMPTY, now_us);
     return;
   }
-  uint32_t n = q->count < PLAYLIST_ENTRIES_MAX ? q->count : PLAYLIST_ENTRIES_MAX;
+  uint32_t n =
+      q->count < PLAYLIST_ENTRIES_MAX ? q->count : PLAYLIST_ENTRIES_MAX;
   memcpy(pl->tracks, q->original, n * sizeof(uint16_t));
   pl->track_count = n;
   pl->tracks_index = ui->queue_index;
@@ -743,7 +773,7 @@ void ui_pl_confirm_key(ui_t *ui, const key_event_t *event, int64_t now_us) {
   }
 }
 
-// --- names from the text entry -------------------------------------------------
+// --- names from the text entry -----------------------------------------------
 
 bool ui_pl_send_name(ui_t *ui, const char *name, int64_t now_us) {
   ui_pl_t *pl = ui->pl;
@@ -779,7 +809,7 @@ bool ui_pl_send_name(ui_t *ui, const char *name, int64_t now_us) {
   return true;
 }
 
-// --- answers -------------------------------------------------------------------
+// --- answers -----------------------------------------------------------------
 
 // The cursor of a list of playlists (row 0 being "New playlist" or
 // "New..."), as the file name of the row it is on; "" for row 0.
@@ -1039,8 +1069,12 @@ static void on_edit(ui_t *ui, const playlist_event_t *ev, int64_t now_us) {
   case PLAYLIST_REQUEST_MOVE_DOWN:
   case PLAYLIST_REQUEST_REMOVE:
     if (on_open) {
+      // The copy has a change the file has not: read it again. If the task
+      // refuses the load, the message stays the edit's ("Card error", not
+      // "Busy"): ui_pl_retry_reload asks again after the next key or event,
+      // and moves and removes wait for it (copy_wrong).
       pl->reload_failed = true;
-      reload(ui, now_us); // the copy has a change the file has not
+      send_load(ui);
     }
     break;
   case PLAYLIST_REQUEST_CREATE:

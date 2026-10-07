@@ -92,6 +92,7 @@ typedef enum {
   UI_OVERLAY_BAD_CHARACTER,
   UI_OVERLAY_BAD_END,
   UI_OVERLAY_BAD_START,
+  UI_OVERLAY_NAME_RESERVED, // a name Windows keeps for a device (CON, ...)
 } ui_overlay_t;
 
 // The track that is playing, or the last one that was. ui_play.c changes
@@ -180,7 +181,11 @@ typedef struct {
   uint32_t open_serial;
   uint32_t load_request;
   bool open_loaded;
-  bool reload_failed; // a reload was asked for because an edit failed
+  // A move or a remove of the open playlist failed: the copy differs from
+  // the file until a load asked for since replaces it. Meanwhile moves and
+  // removes are refused ("Busy"), and the load is asked for again after
+  // every key and event until the task takes it (ui_pl_retry_reload).
+  bool reload_failed;
   playlist_loaded_t open;
 
   // "Play" or "Shuffle play" on a playlist row: the load waited for, and
@@ -302,7 +307,7 @@ static inline void ui_overlay_show(ui_t *ui, ui_overlay_t what,
   ui->overlay_until_us = now_us + UI_OVERLAY_MS * 1000;
 }
 
-// --- ui.c ---------------------------------------------------------------------
+// --- ui.c --------------------------------------------------------------------
 
 // The index, if there is one and it is the one the UI's numbers belong to;
 // NULL otherwise. Whoever gets one calls library_task_put before returning.
@@ -315,7 +320,7 @@ void ui_show_now_playing(ui_t *ui, int64_t now_us);
 // text entry is cancelled).
 void ui_close_layer(ui_t *ui);
 
-// --- ui_options.c: the options menu -------------------------------------------
+// --- ui_options.c: the options menu ------------------------------------------
 
 // `#` in a list: open the menu for the item under the cursor, if it is one
 // that has options. Takes the index once.
@@ -327,7 +332,7 @@ void ui_options_close(ui_t *ui);
 // A key while the menu is open.
 void ui_options_on_key(ui_t *ui, const key_event_t *event, int64_t now_us);
 
-// --- ui_play.c: the track and the queue ---------------------------------------
+// --- ui_play.c: the track and the queue --------------------------------------
 
 // Set the queue up, empty, over `orders`: room for 2 * UI_QUEUE_CAPACITY
 // track numbers. Shuffle and loop are taken from ui->settings. Once, before
@@ -439,6 +444,11 @@ void ui_pl_list(ui_t *ui, int64_t now_us);
 // An event of the playlist task.
 void ui_pl_on_event(ui_t *ui, const playlist_event_t *event, int64_t now_us);
 
+// After every key and event (ui.c): if the open playlist's copy is known
+// to differ from its file and the load that would put it right was
+// refused, ask for it again. O(1) when there is nothing to do.
+void ui_pl_retry_reload(ui_t *ui);
+
 // The index is going (a scan began) or has been replaced: nothing that holds
 // its track numbers may go on (ui.c, THE INDEX).
 void ui_pl_index_changed(ui_t *ui, int64_t now_us);
@@ -447,7 +457,7 @@ void ui_pl_index_changed(ui_t *ui, int64_t now_us);
 // drawing.
 void ui_pl_row_name(const ui_t *ui, uint32_t row, char *out, size_t size);
 
-// --- ui_text.c: the text entry ------------------------------------------------
+// --- ui_text.c: the text entry -----------------------------------------------
 
 // Open it for `purpose`, starting with `initial` (NULL: nothing).
 void ui_text_open(ui_t *ui, ui_text_purpose_t purpose, const char *initial,

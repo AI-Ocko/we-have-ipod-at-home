@@ -591,8 +591,9 @@ static const char *pl_wait(uint32_t request) {
   if (!playlist_task_wait(request, &e, PL_WAIT_MS)) {
     return "the playlist task did not answer";
   }
-  static const char *const NAME[] = {"ok", "empty", "too long", "bad char",
-                                     "bad end", "bad start"};
+  static const char *const NAME[] = {"ok",      "empty",     "too long",
+                                     "bad char", "bad end",  "bad start",
+                                     "reserved"};
   if (e.outcome == PLAYLIST_TASK_BAD_NAME) {
     ESP_LOGI(TAG, "pl event request=%" PRIu32 " kind=%s outcome=%s name=%s",
              e.request, playlist_task_request_name(e.kind),

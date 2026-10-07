@@ -18,7 +18,11 @@ card root, plus the one UTF-8 track the test adds to them:
                       drive letters, backslashes, file:// URLs with %XX,
                       paths relative to /playlists/ and to the card root,
                       letters in the wrong case, UTF-8, a missing entry, a
-                      blank line, and a comment after the last entry
+                      blank line, absolute paths under a computer's mount
+                      point (/run/media/<user>/<card>/, file:///run/media/,
+                      /Volumes/<card>/, /media/<user>/<card>/), a line with
+                      spaces and tabs at both ends, and a comment after the
+                      last entry
   missing.m3u         good entries between ones that match nothing
   blocks.m3u          #EXTM3U, entries with #EXTINF and blank lines before
                       them, and two lines after the last entry
@@ -90,6 +94,14 @@ def main():
         b"file:///e:/Sigur%20R%C3%B3s/%C3%81g%C3%A6tis%20byrjun/01%20Intro.flac",
         b"e:/Gone/Not Here.flac",                                # missing
         b"/deep/a/b/c/d/Deep Track.flac",
+        # Absolute paths with the computer's mount point in front: found
+        # again with their leading folders removed.
+        b"#EXTINF:100,Radiohead - Motion Picture Soundtrack",
+        b"/run/media/christopher/SDCARD/Radiohead/Kid A/10 Motion.flac",
+        b"file:///run/media/christopher/SD%20CARD/Various/Hits/01%20a.flac",
+        b"/Volumes/SDCARD/Various/Hits/02 b.flac",               # macOS
+        b"/media/christopher/SDCARD/Radiohead/OK Computer/02 Paranoid.mp3",
+        b" \tloose/also untagged.mp3 \t ",                       # spaces, tabs
         b"# made by hand",                                       # after the last
     ]
     write("computer.m3u8", BOM + b"".join(l + b"\r\n" for l in computer))

@@ -356,6 +356,8 @@ static const char *overlay_text(ui_overlay_t overlay) {
     return "Can't end in .";
   case UI_OVERLAY_BAD_START:
     return "Can't start w/ ."; // exactly the 16 columns
+  case UI_OVERLAY_NAME_RESERVED:
+    return "Name reserved";
   case UI_OVERLAY_VOLUME:
     break;
   }

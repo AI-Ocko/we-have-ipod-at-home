@@ -358,6 +358,43 @@ void test_name_check_trims_spaces(void) {
   assert_check("\tROCK", PLAYLIST_NAME_BAD_CHAR, NULL);
 }
 
+// Names Windows reserves for devices: a computer cannot open "CON.m3u".
+void test_name_check_refuses_reserved_names(void) {
+  static const char *const RESERVED[] = {
+      "CON",  "PRN",  "AUX",  "NUL",  "COM1", "COM2", "COM3",
+      "COM4", "COM5", "COM6", "COM7", "COM8", "COM9", "LPT1",
+      "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8",
+      "LPT9",
+  };
+  for (size_t k = 0; k < sizeof(RESERVED) / sizeof(RESERVED[0]); k++) {
+    char typed[32];
+    assert_check(RESERVED[k], PLAYLIST_NAME_RESERVED, RESERVED[k]);
+    // Compared once trimmed.
+    snprintf(typed, sizeof(typed), "  %s ", RESERVED[k]);
+    assert_check(typed, PLAYLIST_NAME_RESERVED, RESERVED[k]);
+    // In small letters the name is refused sooner, by the characters (the
+    // rules are checked in order); the reserved check ignores case too,
+    // for the playlist task's re-check of names it is handed.
+    for (size_t i = 0; RESERVED[k][i] != '\0'; i++) {
+      char c = RESERVED[k][i];
+      typed[i] = (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c;
+      typed[i + 1] = '\0';
+    }
+    assert_check(typed, PLAYLIST_NAME_BAD_CHAR, NULL);
+  }
+  // Near misses are ordinary names.
+  static const char *const FINE[] = {
+      "CONCERT", "CON 1", "CO N", "ICON", "PRNX", "AUX1", "NULL", "NU",
+      "COM",     "COM0",  "COM10", "COM1 0", "LPT",  "LPT0", "LPT10", "XCON",
+      "CON-",    "CON'S", "1COM", "CON.X", "CO",   "LPTX",
+  };
+  for (size_t k = 0; k < sizeof(FINE) / sizeof(FINE[0]); k++) {
+    assert_check(FINE[k], PLAYLIST_NAME_OK, FINE[k]);
+  }
+  // A rule earlier in the list wins: "CON." ends with '.'.
+  assert_check("CON.", PLAYLIST_NAME_BAD_END, NULL);
+}
+
 // Every name the device accepts makes a file the catalog lists and finds:
 // a name that could be typed but never listed would vanish, and "Name in
 // use" could not catch a second one.
@@ -458,6 +495,7 @@ int main(void) {
   RUN_TEST(test_full_catalog_sets_truncated);
   RUN_TEST(test_name_check_each_rule);
   RUN_TEST(test_name_check_trims_spaces);
+  RUN_TEST(test_name_check_refuses_reserved_names);
   RUN_TEST(test_every_accepted_name_is_listed);
   RUN_TEST(test_file_for_a_name);
   return UNITY_END();

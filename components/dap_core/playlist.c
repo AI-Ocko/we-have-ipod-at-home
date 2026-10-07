@@ -9,8 +9,10 @@
 // a CR before it, and, for the first line of the file, without a UTF-8
 // byte-order mark. A line whose text is longer than PLAYLIST_LINE_MAX makes
 // the file a bad one. An entry is a line whose text is not blank (empty, or
-// only spaces and tabs) and does not start with '#'. A last line with no LF after it is a line like any other
-// (a lone CR at its end is dropped as well).
+// only spaces and tabs) and does not start with '#'. A last line with no LF
+// after it is a line like any other (a lone CR at its end is dropped as
+// well). Spaces and tabs at either end of an entry's text are not part of
+// its path; edits copy the line as it is.
 //
 // THE WORK AREA. The streams this module is handed are, on the device,
 // opened unbuffered or with small buffers (internal RAM is scarce), so the
@@ -33,7 +35,11 @@
 //
 // READING is one pass: for each entry playlist_line_paths gives at most two
 // candidate paths, and each is looked up with library_find_path, a binary
-// search. Nothing else is done per line beyond finding its end with memchr.
+// search. An absolute path that matches nothing is looked up again with its
+// first folder removed, then its first two, up to MOUNT_FOLDERS_MAX: the
+// tails of the one path already resolved, found with strchr, so a line costs
+// at most two lookups if relative and 1 + MOUNT_FOLDERS_MAX if absolute.
+// Nothing else is done per line beyond finding its end with memchr.
 //
 // EDITING is two passes over the input. The first finds where the blocks the
 // edit names start and end, counts the entries for an APPEND, and checks the
@@ -62,6 +68,10 @@
 // ends as it did.
 
 #define BLOCK_MIN 4096
+// The leading folders an absolute path may lose before it matches: a
+// computer's mount point for the card, such as "/run/media/<user>/<card>/"
+// (3), "/Volumes/<card>/" (2) or a folder on a drive, with room to spare.
+#define MOUNT_FOLDERS_MAX 6
 #define LINE_BYTES_MAX (PLAYLIST_LINE_MAX + 4) // a BOM before, a CR after
 
 enum {
@@ -109,7 +119,7 @@ static bool starts_with(const unsigned char *p, size_t len,
 
 static bool is_blank(const unsigned char *text, size_t len);
 
-// --- Paths ---------------------------------------------------------------------
+// --- Paths -------------------------------------------------------------------
 
 // The bytes of a line's path, one at a time: backslashes come out as '/',
 // and in a file:// URL %XX escapes come out decoded.
@@ -234,11 +244,25 @@ static bool is_other_url(const unsigned char *p, size_t len) {
   return i >= 2 && len - i >= 3 && memcmp(p + i, "://", 3) == 0;
 }
 
-uint32_t playlist_line_paths(const char *line, size_t len,
-                             char paths[2][PLAYLIST_PATH_MAX]) {
+static inline bool is_space(unsigned char c) { return c == ' ' || c == '\t'; }
+
+// playlist_line_paths, saying also whether the line was absolute.
+static uint32_t line_paths(const char *line, size_t len,
+                           char paths[2][PLAYLIST_PATH_MAX],
+                           bool *absolute_out) {
   const unsigned char *p = (const unsigned char *)line;
+  *absolute_out = false;
   if (len == 0 || p[0] == '#' || is_blank(p, len)) {
     return 0;
+  }
+  // Spaces and tabs at either end are not part of the path. A blank line
+  // has been refused, so something is left.
+  while (is_space(p[0])) {
+    p++;
+    len--;
+  }
+  while (is_space(p[len - 1])) {
+    len--;
   }
   source_t s = {.p = p, .i = 0, .n = len, .url = false};
   bool absolute = false;
@@ -269,6 +293,7 @@ uint32_t playlist_line_paths(const char *line, size_t len,
   }
 
   if (absolute) {
+    *absolute_out = true;
     return resolve(s, "", 0, paths[0]) ? 1 : 0;
   }
   // From the card root first: a "../" line (as the device writes) goes
@@ -283,7 +308,13 @@ uint32_t playlist_line_paths(const char *line, size_t len,
   return n;
 }
 
-// --- Reading in blocks -----------------------------------------------------------
+uint32_t playlist_line_paths(const char *line, size_t len,
+                             char paths[2][PLAYLIST_PATH_MAX]) {
+  bool absolute;
+  return line_paths(line, len, paths, &absolute);
+}
+
+// --- Reading in blocks -------------------------------------------------------
 
 typedef struct {
   FILE *f; // NULL: an empty file
@@ -423,6 +454,17 @@ static inline bool is_entry(const unsigned char *text, size_t len) {
   return !is_blank(text, len) && text[0] != '#';
 }
 
+// The track at `path`, or PLAYLIST_MISSING.
+static uint16_t find_track(const library_t *lib, uint32_t n_tracks,
+                           const char *path) {
+  uint32_t found;
+  if (library_find_path(lib, path, &found) && found < n_tracks &&
+      found < PLAYLIST_MISSING) {
+    return (uint16_t)found;
+  }
+  return PLAYLIST_MISSING;
+}
+
 playlist_result_t playlist_read(FILE *in, const library_t *lib,
                                 uint16_t *tracks, uint32_t max,
                                 uint32_t *count, playlist_work_t *work) {
@@ -455,14 +497,25 @@ playlist_result_t playlist_read(FILE *in, const library_t *lib,
       result = PLAYLIST_TRUNCATED;
       break;
     }
+    bool absolute;
+    uint32_t k = line_paths((const char *)text, len, paths, &absolute);
     uint16_t track = PLAYLIST_MISSING;
-    uint32_t k = playlist_line_paths((const char *)text, len, paths);
-    for (uint32_t i = 0; i < k; i++) {
-      uint32_t found;
-      if (library_find_path(lib, paths[i], &found) && found < n_tracks &&
-          found < PLAYLIST_MISSING) {
-        track = (uint16_t)found;
-        break;
+    for (uint32_t i = 0; i < k && track == PLAYLIST_MISSING; i++) {
+      track = find_track(lib, n_tracks, paths[i]);
+    }
+    // An absolute path that is not on the card: perhaps it is under the
+    // computer's mount point for the card. Its tails, longest first; the
+    // file name alone is the last.
+    if (absolute && k == 1) {
+      const char *tail = paths[0];
+      for (int cut = 0; cut < MOUNT_FOLDERS_MAX && track == PLAYLIST_MISSING;
+           cut++) {
+        const char *slash = strchr(tail, '/');
+        if (slash == NULL) {
+          break;
+        }
+        tail = slash + 1;
+        track = find_track(lib, n_tracks, tail);
       }
     }
     tracks[n++] = track;
@@ -471,7 +524,7 @@ playlist_result_t playlist_read(FILE *in, const library_t *lib,
   return result;
 }
 
-// --- Writing in blocks -----------------------------------------------------------
+// --- Writing in blocks -------------------------------------------------------
 
 typedef struct {
   FILE *f;
@@ -556,7 +609,7 @@ static bool copy(reader_t *r, writer_t *w, size_t from, size_t to) {
   return !w->error;
 }
 
-// --- Editing ---------------------------------------------------------------------
+// --- Editing -----------------------------------------------------------------
 
 // What the first pass finds.
 typedef struct {

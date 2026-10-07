@@ -29,8 +29,9 @@
 //
 // The UI task owns the LCD and is the only reader of five queues: key events
 // (the keypad and the console), player events, card events (start-up), the
-// library's status and the playlist task's answers. They are joined in a queue set, so the task sleeps
-// on all of them at once. One pass of its loop is:
+// library's status and the playlist task's answers. They are joined in a
+// queue set, so the task sleeps on all of them at once. One pass of its loop
+// is:
 //
 //   1. read the clock, once: it decides what is drawn and how long to sleep
 //   2. act on a time that has come: a "Can't play" notice that has had its
@@ -116,12 +117,12 @@
 // layers included, until overlay_until_us: the volume bar, or the words that
 // confirm a key ("Shuffle on", "Loop all", "Added", "Queue full") or give a
 // playlist request's answer ("Saved", "Name in use", "Busy", ...); the
-// newest replaces the one before. A notice ("Can't play", "File missing") replaces Now
-// Playing's bottom row until play.notice_until_us, and when it goes the
-// next track is started; the overlay is drawn over it. Each is a time in
-// ui_t: ui_render compares it with the clock, and ui_next_change_ms makes
-// it one of the moments the loop sleeps until, along with the marquee's
-// next step. There is one sleep and no timer.
+// newest replaces the one before. A notice ("Can't play", "File missing")
+// replaces Now Playing's bottom row until play.notice_until_us, and when it
+// goes the next track is started; the overlay is drawn over it. Each is a
+// time in ui_t: ui_render compares it with the clock, and ui_next_change_ms
+// makes it one of the moments the loop sleeps until, along with the
+// marquee's next step. There is one sleep and no timer.
 //
 // KEYS
 //
@@ -200,9 +201,9 @@
 // menu (browse_library_changed), every layer closes, the open playlist and
 // any tracks held for a playlist are dropped (ui_pl_index_changed), and only
 // then is the new index used. A scan beginning does the same but for the
-// menus, which the scan screen covers until the new index comes. The queue's numbers are tied to an index by its
-// checksum instead, because a queue outlives a scan that finds the same
-// tracks (ui_play.c, A NEW INDEX).
+// menus, which the scan screen covers until the new index comes. The queue's
+// numbers are tied to an index by its checksum instead, because a queue
+// outlives a scan that finds the same tracks (ui_play.c, A NEW INDEX).
 //
 // With no index (a scan that failed, or before the first load) the library's
 // lists are empty: the list's name and "(empty)".
@@ -677,7 +678,7 @@ static void ui_on_key(ui_t *ui, const key_event_t *event, int64_t now_us) {
   }
 }
 
-// --- the player, the card and the library --------------------------------------
+// --- the player, the card and the library ------------------------------------
 
 static void ui_on_library_status(ui_t *ui, const library_status_t *status,
                                  int64_t now_us) {
@@ -744,6 +745,8 @@ static void ui_take(ui_t *ui, QueueSetMemberHandle_t ready, int64_t now_us) {
       ui_pl_on_event(ui, &event, now_us);
     }
   }
+  // A reload the playlist task refused, asked for again (ui_playlists.c).
+  ui_pl_retry_reload(ui);
 }
 
 // The console asked what the queue holds (ui_queue_report). Numbers only:
@@ -779,7 +782,7 @@ static void ui_answer_report(const ui_t *ui) {
   xSemaphoreGive(s_report_done);
 }
 
-// --- the task ------------------------------------------------------------------
+// --- the task ----------------------------------------------------------------
 
 // How long to sleep for a change that is `ms` away. A wait of n ticks ends
 // at the n-th tick from now, which is anything from n - 1 to n tick periods

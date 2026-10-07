@@ -214,6 +214,41 @@ static bool allowed(char ch) {
          ch == '-' || ch == '\'' || ch == '&' || ch == '.';
 }
 
+static char upper(char ch) {
+  return (ch >= 'a' && ch <= 'z') ? (char)(ch - ('a' - 'A')) : ch;
+}
+
+// CON, PRN, AUX, NUL, COM1-COM9 or LPT1-LPT9, ignoring ASCII case: the whole
+// name, so "CONCERT" and "COM10" are not.
+static bool is_reserved(const char *name, size_t len) {
+  static const char THREE[][4] = {"CON", "PRN", "AUX", "NUL"};
+  static const char FOUR[][4] = {"COM", "LPT"};
+  char u[4];
+  if (len != 3 && len != 4) {
+    return false;
+  }
+  for (size_t k = 0; k < 3; k++) {
+    u[k] = upper(name[k]);
+  }
+  if (len == 3) {
+    for (size_t k = 0; k < sizeof(THREE) / sizeof(THREE[0]); k++) {
+      if (memcmp(u, THREE[k], 3) == 0) {
+        return true;
+      }
+    }
+    return false;
+  }
+  if (name[3] < '1' || name[3] > '9') {
+    return false;
+  }
+  for (size_t k = 0; k < sizeof(FOUR) / sizeof(FOUR[0]); k++) {
+    if (memcmp(u, FOUR[k], 3) == 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
 // The rules are checked in the order of playlist_name_t, and the first one
 // broken is the answer. On EMPTY and TOO_LONG `out` is ""; otherwise it is
 // the trimmed name, whether or not the name is allowed.
@@ -256,6 +291,11 @@ playlist_name_t playlist_name_check(const char *typed, char *out) {
   // see it.
   if (out[0] == '.') {
     return PLAYLIST_NAME_BAD_START;
+  }
+  // Windows keeps these names for devices, so a computer could not open
+  // the file the card holds.
+  if (is_reserved(out, len)) {
+    return PLAYLIST_NAME_RESERVED;
   }
   return PLAYLIST_NAME_OK;
 }

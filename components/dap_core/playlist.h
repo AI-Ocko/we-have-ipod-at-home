@@ -37,16 +37,36 @@ typedef enum {
   PLAYLIST_IO_ERROR,  // a read or a write failed
 } playlist_result_t;
 
-// The paths from the card root that an M3U line may mean, most likely first:
-// 0 (a comment, an empty line, a URL that is not file://, a path that goes
-// above the card root), 1 (an absolute path) or 2 (a relative one: from the
-// card root, then from "playlists/"). `line` excludes the end of line.
+// The paths from the card root that an M3U line may mean, most likely first.
+// `line` excludes the end of line. Spaces and tabs at either end of it are
+// not part of the path (edits still copy the line's bytes as they are).
+// Backslashes count as '/'; a file:// URL has its %XX escapes decoded.
+//   0  a comment (a line starting '#'), a blank line (empty, or only spaces
+//      and tabs), a URL that is not file://, a bad % escape in a file://
+//      URL, a NUL, a path above the card root or of the root itself, or one
+//      longer than PLAYLIST_PATH_MAX - 1 bytes
+//   1  an absolute path (a leading '/', a drive letter such as "E:", or a
+//      file:// URL), from the card root; or a relative one with only one of
+//      the two readings below ("../x" goes above the root from the root;
+//      a 255-byte path does not fit after "playlists/")
+//   2  a relative path: from the card root, then from "playlists/"
+// An absolute path is one candidate here; when it matches nothing,
+// playlist_read tries it again without its leading folders (see there).
 uint32_t playlist_line_paths(const char *line, size_t len,
                              char paths[2][PLAYLIST_PATH_MAX]);
 
 // Read a playlist: the track of each entry in file order, PLAYLIST_MISSING
 // for one that matches nothing in `lib`. `tracks` holds `max` entries
 // (normally PLAYLIST_ENTRIES_MAX).
+//
+// Each entry's candidates (playlist_line_paths) are looked up in order and
+// the first match wins. An absolute path that matches nothing is looked up
+// again with its first folder removed, then its first two, and so on up to
+// six (never the file name itself), so that a computer's mount point for
+// the card ("/run/media/<user>/<card>/", "/media/<user>/<card>/",
+// "/Volumes/<card>/") does not matter; the first match wins, so the path
+// with the fewest folders removed is the one taken. At most 2 lookups for
+// a relative line and 7 for an absolute one.
 playlist_result_t playlist_read(FILE *in, const library_t *lib,
                                 uint16_t *tracks, uint32_t max,
                                 uint32_t *count, playlist_work_t *work);

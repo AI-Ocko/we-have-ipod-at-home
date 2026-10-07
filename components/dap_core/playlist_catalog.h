@@ -50,11 +50,15 @@ typedef enum {
   PLAYLIST_NAME_BAD_CHAR, // a character that is not allowed
   PLAYLIST_NAME_BAD_END,  // ends with '.'
   PLAYLIST_NAME_BAD_START, // starts with '.'
+  PLAYLIST_NAME_RESERVED,  // a name Windows reserves: CON, PRN, AUX, NUL,
+                           // COM1-COM9, LPT1-LPT9 (any case)
 } playlist_name_t;
 
 // Check a typed name and write the name to use (spaces at both ends
-// trimmed) to `out` (at least PLAYLIST_NAME_MAX + 1 bytes). Whether it is in
-// use is playlist_catalog_find's business.
+// trimmed) to `out` (at least PLAYLIST_NAME_MAX + 1 bytes). The rules are
+// checked in the order of playlist_name_t and the first broken is returned;
+// RESERVED compares the whole trimmed name ("CON", not "CONCERT"). Whether
+// it is in use is playlist_catalog_find's business.
 playlist_name_t playlist_name_check(const char *typed, char *out);
 
 // "<name>.m3u", the file a new playlist gets. Always terminated.

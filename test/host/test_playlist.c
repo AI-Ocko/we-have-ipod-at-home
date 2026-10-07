@@ -103,6 +103,21 @@ size_t __wrap_fwrite(const void *p, size_t size, size_t n, FILE *f) {
   return __real_fwrite(p, size, n, f);
 }
 
+// The lookups playlist_read makes, counted the same way.
+static bool counting_finds;
+static unsigned finds;
+
+bool __real_library_find_path(const library_t *lib, const char *path,
+                              uint32_t *track);
+
+bool __wrap_library_find_path(const library_t *lib, const char *path,
+                              uint32_t *track) {
+  if (counting_finds) {
+    finds++;
+  }
+  return __real_library_find_path(lib, path, track);
+}
+
 static void count_start(void) {
   counting = true;
   small_reads = 0;
@@ -315,6 +330,28 @@ void test_line_paths_absolute_relative_and_comments(void) {
   TEST_ASSERT_EQUAL_size_t(PLAYLIST_PATH_MAX - 1, strlen(paths[0]));
 }
 
+// Spaces and tabs at either end of a line are not part of its path.
+void test_line_paths_trims_spaces_and_tabs(void) {
+  assert_paths("x.flac ", 2, "x.flac", "playlists/x.flac");
+  assert_paths(" \tx.flac\t ", 2, "x.flac", "playlists/x.flac");
+  assert_paths("\t../a b.flac\t", 1, "a b.flac", NULL);
+  assert_paths("  /Music/a.flac  ", 1, "Music/a.flac", NULL);
+  assert_paths("\tE:\\Music\\a.flac \t", 1, "Music/a.flac", NULL);
+  assert_paths(" file:///E:/A%20B.flac ", 1, "A B.flac", NULL);
+  assert_paths(" http://example.com/a.mp3", 0, NULL, NULL);
+  // Inside the path they stay, and so does an escaped one at its end.
+  assert_paths("../a \t b.flac", 1, "a \t b.flac", NULL);
+  assert_paths("file:///E:/A%20", 1, "A ", NULL);
+  // Nothing but spaces and tabs is a blank line.
+  assert_paths(" \t ", 0, NULL, NULL);
+  // An absolute path is still one path from the card root: dropping a
+  // computer's mount point is playlist_read's retry, not another candidate.
+  assert_paths("/run/media/christopher/SDCARD/music/x.flac", 1,
+               "run/media/christopher/SDCARD/music/x.flac", NULL);
+  assert_paths("/Volumes/SDCARD/music/x.flac", 1,
+               "Volumes/SDCARD/music/x.flac", NULL);
+}
+
 void test_line_paths_backslashes_and_case(void) {
   assert_paths("..\\Radiohead\\Kid A\\x.flac", 1, "Radiohead/Kid A/x.flac",
                NULL);
@@ -358,8 +395,146 @@ void test_read_computer_made_file(void) {
       utf8,      // the same as a file:// URL with %C3%B3
       MISSING,   // e:/Gone/Not Here.flac
       lib16(15), // /deep/a/b/c/d/Deep Track.flac
+      lib16(2),  // /run/media/christopher/SDCARD/Radiohead/Kid A/...
+      lib16(7),  // file:///run/media/christopher/SD%20CARD/Various/...
+      lib16(8),  // /Volumes/SDCARD/Various/Hits/02 b.flac
+      lib16(4),  // /media/christopher/SDCARD/Radiohead/OK Computer/...
+      lib16(12), // " \tloose/also untagged.mp3 \t "
   };
-  assert_tracks(expected, 9);
+  assert_tracks(expected, 14);
+}
+
+// A file of the lines in `text`, read; its tracks are in `tracks`.
+static playlist_result_t read_text(const char *text) {
+  FILE *in = file_of(text, strlen(text));
+  return read_list(in, tracks, PLAYLIST_ENTRIES_MAX, &count);
+}
+
+void test_read_trims_spaces_and_tabs(void) {
+  TEST_ASSERT_EQUAL(PLAYLIST_OK,
+                    read_text("../Bjork/Homogenic/01 Hunter.flac \r\n"
+                              "\t../Bjork/Homogenic/02 Joga.flac\t\n"
+                              "  /Queen/Hits/01 Bohemian.mp3  \n"
+                              " E:\\loose\\text.mp3\t\r\n"
+                              "loose/empty.flac \t"));
+  const uint16_t expected[] = {lib16(5), lib16(6), lib16(10), lib16(14),
+                               lib16(13)};
+  assert_tracks(expected, 5);
+}
+
+// An absolute path that matches nothing is tried again without its first
+// folder, then its first two, up to six: a computer's mount point
+// (/run/media/<user>/<card>/, /media/<user>/<card>/, /Volumes/<card>/, a
+// folder on a drive) does not matter.
+void test_read_absolute_paths_without_the_mount_point(void) {
+  TEST_ASSERT_EQUAL(
+      PLAYLIST_OK,
+      read_text(
+          // Linux: udisks (Arch, Fedora), and older Ubuntu.
+          "/run/media/christopher/SDCARD/Radiohead/Kid A/01 Everything.flac\n"
+          "/media/christopher/SDCARD/Bjork/Homogenic/02 Joga.flac\n"
+          // VLC and Rhythmbox write URLs; the card's label has a space.
+          "file:///run/media/christopher/SD%20CARD/loose/untagged%20song.flac\n"
+          // macOS.
+          "/Volumes/SDCARD/Queen/Hits/01 Bohemian.mp3\n"
+          // Windows: the card as E:, and a playlist made in E:\Music.
+          "E:\\Radiohead\\Kid A\\02 Kid A.flac\n"
+          "E:\\Music\\Radiohead\\OK Computer\\01 Airbag.mp3\n"
+          // Six folders removed is the most; seven is missing.
+          "/1/2/3/4/5/6/Radiohead/Kid A/10 Motion.flac\n"
+          "/1/2/3/4/5/6/7/Radiohead/Kid A/10 Motion.flac\n"
+          // Not on the card under any of its tails.
+          "/Volumes/SDCARD/Gone/x.flac\n"
+          // A relative line is not retried this way.
+          "run/media/christopher/SDCARD/Radiohead/Kid A/01 Everything.flac\n"
+          "../Volumes/SDCARD/Radiohead/Kid A/01 Everything.flac\n"
+          // The file name alone is the last thing tried.
+          "/Volumes/SDCARD/Various\n"));
+  const uint16_t expected[] = {lib16(0), lib16(6),  lib16(11), lib16(10),
+                               lib16(1), lib16(3),  lib16(2),  MISSING,
+                               MISSING,  MISSING,   MISSING,   MISSING};
+  assert_tracks(expected, 12);
+}
+
+// When more than one tail of a path is on the card, the longest wins: the
+// path with the fewest folders removed is tried first, and the first match
+// is the answer.
+void test_read_absolute_path_first_match_wins(void) {
+  static library_track_in_t more[TRACKS + 1];
+  static uint32_t arena[LIB16_ARENA_BYTES / 4];
+  memcpy(more, rows, sizeof(rows));
+  more[TRACKS] = (library_track_in_t)LIB16_ROW(
+      "c/d/Deep Track.flac", "Shallow Track", "Deep Artist", "Deep Album",
+      "Deep Artist", 0, 2, 100, TAGS_FORMAT_FLAC);
+  lib = lib16_build_from(arena, more, TRACKS + 1);
+  const uint16_t deep = track_of("deep/a/b/c/d/Deep Track.flac");
+  const uint16_t shallow = track_of("c/d/Deep Track.flac");
+  TEST_ASSERT_NOT_EQUAL(deep, shallow);
+  TEST_ASSERT_EQUAL(
+      PLAYLIST_OK,
+      read_text(
+          // Two removed gives deep/...; five would give c/d/...
+          "/Volumes/SDCARD/deep/a/b/c/d/Deep Track.flac\n"
+          // Only c/d/... is on the card among this one's tails.
+          "/Volumes/SDCARD/a/b/c/d/Deep Track.flac\n"
+          // From the root, nothing is removed.
+          "/c/d/Deep Track.flac\n"));
+  const uint16_t expected[] = {deep, shallow, shallow};
+  assert_tracks(expected, 3);
+}
+
+// The lookups for one line stay bounded: two for a relative line, seven
+// for an absolute one (the path, then up to six folders removed), however
+// many folders it has.
+void test_read_lookups_per_line_are_bounded(void) {
+  struct {
+    const char *line;
+    unsigned finds;
+    uint16_t track;
+  } cases[] = {
+      {"/1/2/3/4/5/6/7/8/9/10/11/12/x.flac", 7, MISSING},
+      {"file:///1/2/3/4/5/6/7/8/9/x.flac", 7, MISSING},
+      {"E:\\1\\2\\3\\4\\5\\6\\7\\8\\x.flac", 7, MISSING},
+      {"/1/2/3/4/5/6/Radiohead/Kid A/10 Motion.flac", 7, lib16(2)},
+      {"/a/x.flac", 2, MISSING},     // "a/x.flac", then "x.flac"
+      {"/x.flac", 1, MISSING},       // the file name alone: nothing to remove
+      {"/Radiohead/Kid A/02 Kid A.flac", 1, lib16(1)},
+      {"/Volumes/SDCARD/Radiohead/Kid A/02 Kid A.flac", 3, lib16(1)},
+      {"1/2/3/4/5/6/7/8/9/x.flac", 2, MISSING},
+      {"../1/2/3/4/5/6/7/8/9/x.flac", 1, MISSING},
+      {"Radiohead/Kid A/02 Kid A.flac", 1, lib16(1)},
+      {"#EXTINF:1,x", 0, 0},
+  };
+  for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+    finds = 0;
+    counting_finds = true;
+    playlist_result_t r = read_text(cases[i].line);
+    counting_finds = false;
+    TEST_ASSERT_EQUAL_MESSAGE(PLAYLIST_OK, r, cases[i].line);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(cases[i].finds, finds, cases[i].line);
+    if (cases[i].finds > 0) {
+      TEST_ASSERT_EQUAL_UINT32_MESSAGE(1, count, cases[i].line);
+      TEST_ASSERT_EQUAL_UINT16_MESSAGE(cases[i].track, tracks[0],
+                                       cases[i].line);
+    } else {
+      TEST_ASSERT_EQUAL_UINT32(0, count);
+    }
+    tearDown();
+  }
+  // A whole file of the worst lines: seven each.
+  static char text[64 * 40];
+  size_t len = 0;
+  for (int i = 0; i < 64; i++) {
+    len += (size_t)snprintf(text + len, sizeof(text) - len,
+                            "/a/b/c/d/e/f/g/h/i/%02d.flac\n", i);
+  }
+  finds = 0;
+  counting_finds = true;
+  playlist_result_t r = read_text(text);
+  counting_finds = false;
+  TEST_ASSERT_EQUAL(PLAYLIST_OK, r);
+  TEST_ASSERT_EQUAL_UINT32(64, count);
+  TEST_ASSERT_EQUAL_UINT(64 * 7, finds);
 }
 
 void test_read_marks_missing_entries(void) {
@@ -916,6 +1091,12 @@ static const char *const COMPUTER[] = {
     "file:///e:/Sigur%20R%C3%B3s/%C3%81g%C3%A6tis%20byrjun/01%20Intro.flac" CRLF,
     "e:/Gone/Not Here.flac" CRLF,
     "/deep/a/b/c/d/Deep Track.flac" CRLF,
+    "#EXTINF:100,Radiohead - Motion Picture Soundtrack" CRLF
+    "/run/media/christopher/SDCARD/Radiohead/Kid A/10 Motion.flac" CRLF,
+    "file:///run/media/christopher/SD%20CARD/Various/Hits/01%20a.flac" CRLF,
+    "/Volumes/SDCARD/Various/Hits/02 b.flac" CRLF,
+    "/media/christopher/SDCARD/Radiohead/OK Computer/02 Paranoid.mp3" CRLF,
+    " \tloose/also untagged.mp3 \t " CRLF,
 };
 #define COMPUTER_N (sizeof(COMPUTER) / sizeof(COMPUTER[0]))
 static const char COMPUTER_TAIL[] = "# made by hand" CRLF;
@@ -1114,9 +1295,9 @@ void test_edit_refuses_a_line_that_is_too_long(void) {
 void test_blank_lines_are_not_entries(void) {
   assert_paths(" ", 0, NULL, NULL);
   assert_paths(" \t  \t", 0, NULL, NULL);
-  assert_paths(" ../Radiohead/Kid A/01 Everything.flac", 2,
-               " ../Radiohead/Kid A/01 Everything.flac",
-               "playlists/ ../Radiohead/Kid A/01 Everything.flac");
+  // A space before a path is trimmed, not part of a folder's name.
+  assert_paths(" ../Radiohead/Kid A/01 Everything.flac", 1,
+               "Radiohead/Kid A/01 Everything.flac", NULL);
 
   const char text[] = "\xef\xbb\xbf \t\r\n"
                       "../Bjork/Homogenic/01 Hunter.flac\n"
@@ -1305,8 +1486,13 @@ int main(void) {
   UNITY_BEGIN();
   RUN_TEST(test_line_paths_absolute_relative_and_comments);
   RUN_TEST(test_line_paths_backslashes_and_case);
+  RUN_TEST(test_line_paths_trims_spaces_and_tabs);
   RUN_TEST(test_read_device_made_file);
   RUN_TEST(test_read_computer_made_file);
+  RUN_TEST(test_read_trims_spaces_and_tabs);
+  RUN_TEST(test_read_absolute_paths_without_the_mount_point);
+  RUN_TEST(test_read_absolute_path_first_match_wins);
+  RUN_TEST(test_read_lookups_per_line_are_bounded);
   RUN_TEST(test_read_marks_missing_entries);
   RUN_TEST(test_read_more_than_a_thousand_entries_is_truncated);
   RUN_TEST(test_read_rejects_a_line_that_is_too_long);

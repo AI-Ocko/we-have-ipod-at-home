@@ -85,11 +85,13 @@ dap_test(test_options)
 dap_test(test_crc32)
 dap_test(test_textentry)
 # The playlist files made by tools/make_test_playlists.py. Its tests check
-# that every fread and fwrite the module makes moves a whole block.
+# that every fread and fwrite the module makes moves a whole block, and count
+# the index lookups each line costs.
 dap_test(test_playlist)
 target_compile_definitions(test_playlist PRIVATE
   FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/playlists")
-target_link_options(test_playlist PRIVATE -Wl,--wrap=fread -Wl,--wrap=fwrite)
+target_link_options(test_playlist PRIVATE -Wl,--wrap=fread -Wl,--wrap=fwrite
+  -Wl,--wrap=library_find_path)
 dap_test(test_playlist_catalog)
 # The FLAC files made by tools/make_test_audio.sh.
 target_compile_definitions(test_flac_header PRIVATE
