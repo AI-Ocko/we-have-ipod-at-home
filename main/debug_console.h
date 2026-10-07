@@ -35,6 +35,20 @@
 //                            ui_backlight=<0..3> ui_sleep_s=<n> ui_fading=<0|1>`
 //                            (the backlight, its setting as in `state`, the
 //                            seconds the sleep timer has left, 0 when off)
+//                            Its heap figures, in bytes: `heap_int` and
+//                            `heap_int_largest` are internal RAM free and its
+//                            largest free block counting IRAM-only heap,
+//                            which no data buffer can use, so they overstate
+//                            what is usable; `heap_data`, `heap_data_largest`
+//                            and `heap_data_min` are internal data RAM
+//                            (MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) free, its
+//                            largest free block and the least ever free since
+//                            start-up; `psram` and `psram_largest` are PSRAM
+//                            free and its largest free block. The same data
+//                            RAM and PSRAM figures are logged (tag `player`)
+//                            at every STARTED and ENDED: `MEM <started|ended>
+//                            int_free=<n> int_largest=<n> int_min=<n>
+//                            psram_free=<n> psram_largest=<n>`.
 //   stall <ms>               test aid: the decoder task does nothing for that
 //                            long (at most 30000), to force an underrun
 //   screen                   logs what the LCD was last told to show, each

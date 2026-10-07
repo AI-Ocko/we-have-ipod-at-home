@@ -239,6 +239,9 @@ static const char *cmd_hold(char *args) {
 }
 
 static const char *cmd_stat(void) {
+  // Internal RAM a buffer can use: MALLOC_CAP_INTERNAL alone counts IRAM-only
+  // heap too, which holds no data (see debug_console.h).
+  const uint32_t DATA_RAM = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
   static const char *const STATE[] = {"idle", "playing", "paused"};
   player_status_t s;
   player_get_status(&s);
@@ -248,6 +251,8 @@ static const char *cmd_stat(void) {
            "stat state=%s pos_ms=%u vol=%d fill=%u low=%d underruns=%u "
            "wall_ms=%u dec_busy_ms=%u out_busy_ms=%u dec_stack_free=%u "
            "out_stack_free=%u heap_int=%u heap_int_largest=%u "
+           "heap_data=%u heap_data_largest=%u heap_data_min=%u psram=%u "
+           "psram_largest=%u "
            "ui_stack_free=%u ui_passes=%u ui_lcd=%u ui_light=%s "
            "ui_backlight=%u ui_sleep_s=%u ui_fading=%d",
            STATE[s.state], (unsigned)s.position_ms, s.volume,
@@ -257,6 +262,11 @@ static const char *cmd_stat(void) {
            (unsigned)s.output_stack_free,
            (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
            (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
+           (unsigned)heap_caps_get_free_size(DATA_RAM),
+           (unsigned)heap_caps_get_largest_free_block(DATA_RAM),
+           (unsigned)heap_caps_get_minimum_free_size(DATA_RAM),
+           (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+           (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM),
            (unsigned)ui.stack_free, (unsigned)ui.passes,
            (unsigned)ui.lcd_updates, ui.lit ? "on" : "off",
            (unsigned)ui.backlight, (unsigned)ui.sleep_left_s, (int)ui.fading);

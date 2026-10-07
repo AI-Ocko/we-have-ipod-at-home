@@ -1,3 +1,4 @@
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_random.h"
 #include "library_task.h"
@@ -803,6 +804,25 @@ static void adopt(ui_t *ui, uint32_t play_id, int64_t now_us) {
   }
 }
 
+// One line of heap figures, logged when a track starts and when it ends, so
+// that a long run shows whether memory holds steady from track to track.
+// Internal data RAM (MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT: unlike
+// MALLOC_CAP_INTERNAL alone it leaves out IRAM-only heap, which no buffer can
+// use): free bytes, the largest free block and the least ever free since
+// start-up; then free PSRAM and its largest free block. Walking the heaps
+// takes well under a millisecond; it is done twice per track.
+static void log_memory(const char *when) {
+  const uint32_t data = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
+  ESP_LOGI(PLAYER_TAG,
+           "MEM %s int_free=%u int_largest=%u int_min=%u psram_free=%u "
+           "psram_largest=%u",
+           when, (unsigned)heap_caps_get_free_size(data),
+           (unsigned)heap_caps_get_largest_free_block(data),
+           (unsigned)heap_caps_get_minimum_free_size(data),
+           (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+           (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM));
+}
+
 void ui_play_on_event(ui_t *ui, const player_event_t *event, int64_t now_us) {
   ui_play_t *play = &ui->play;
   // Which `play` the event is about. A line of its own, ahead of the event's
@@ -835,6 +855,7 @@ void ui_play_on_event(ui_t *ui, const player_event_t *event, int64_t now_us) {
              PRIu32,
              path, event->sample_rate, event->bits, event->channels,
              event->duration_ms);
+    log_memory("started");
     if (!old) {
       // The time stays where the track was started from (within the
       // length).
@@ -877,6 +898,7 @@ void ui_play_on_event(ui_t *ui, const player_event_t *event, int64_t now_us) {
     player_get_status(&status);
     ESP_LOGI(PLAYER_TAG, "ENDED frames=%" PRIu32 " expected=%" PRIu32,
              status.ended_frames, status.ended_expected);
+    log_memory("ended");
     if (!old) {
       play->active = false;
       advance(ui, MOVE_ENDED, now_us);
