@@ -359,6 +359,34 @@ Required content of `docs/USER_GUIDE.md`, written for the owner, in plain words,
 
 ---
 
+### Task 7: The card pulled out while running, and "Library full" (added during the stage)
+
+Writing the user guide (Task 6) found two failure cases of spec section 11 that were never built: "Read error during playback: Stop, 'Card error', unmount, return to the retry loop" (spec section 2 also requires re-inserting the card to be enough by itself, with no reset), and "Index memory cap reached: Stop scan, keep partial index, 'Library full'" (the scan keeps the partial index, but nothing tells the user). Today the card is mounted only at start-up (`main/app_main.c` `wait_for_card`), and a card pulled while running gives `Can't play`/`File missing` until a reset.
+
+**Files:**
+- Modify: `main/app_main.c` (the task that mounts the card), `components/dap_hw/storage.c/.h`, `main/library_task.c/.h`, `main/state_task.c/.h`, `main/playlist_task.c/.h`, `main/ui*.c`, `main/debug_console.c/.h`, `docs/USER_GUIDE.md` (troubleshooting); `main/player.c` only if the player cannot otherwise report a card read error distinctly from a decode error
+
+Required behaviour:
+- **Noticing the card has gone:** when the player, the library task, the state task or the playlist task meets a card I/O failure, the task that mounts the card is told and checks whether the card still answers (a cheap status command, not a file operation). It does not poll the card while nothing has failed.
+- **When it has gone:** playback stops the way a stop does (the track stays on Now Playing), the screen shows `Card error` for 1.5 s and then `Insert SD card` while the card is retried every 2 seconds, and the card is unmounted. Every task that was using the card gives up cleanly; nothing aborts, restarts or waits forever; the UI never waits on the card.
+- **When it comes back:** it is mounted again; the library index is loaded again from the card (or scanned, as at start-up, if it is missing or damaged); the playlist screens list again. If the index loaded is the same index (same checksum), the queue, the track on Now Playing and its place are kept and `D` resumes it; if it is a different card or a different index, the queue is cleared as for any new index. Saved settings are unaffected. No reset is needed.
+- **The saved state:** a queue save or position save that fails because the card went away is retried after the card comes back (the state task's existing retry); nothing half-written is trusted.
+- **Library full:** when a scan stops because the index is full, the screen shows `Library full` for 1.5 s, and About shows the track count followed by `(full)` until the next scan.
+- **The user guide's troubleshooting** describes the new behaviour (no reset needed).
+
+Board checks (the agent cannot pull the card; a committed console command `card lost` that makes the mounting task act as if a card failure had been reported and the status check had failed is acceptable for checks 1-4, and the real pull is in the user's hardware check):
+1. While the music track plays: `card lost`: playback stops, `screen` shows `Card error` then `Insert SD card`, the log shows the unmount and the retries; the card (still present) is mounted again; the index loads (same checksum); `queue` unchanged; `D` resumes near where it stopped; exact `ENDED` when it then plays to its end.
+2. The same while a playlist edit, a queue save and a scan are in progress (one at a time): each gives up cleanly and works again after the remount; no stray `.tmp`, the queue file and playlists intact.
+3. A different index after the remount (a temporary hook that changes what the scan finds, not committed): the queue is cleared.
+4. Nothing waits: keys keep working (menus, volume) while the card is away; the backlight and sleep timers keep counting.
+5. Library full: a temporary build with a small index cap (not committed): `Library full` shows when the scan stops; About shows `(full)`; the partial index works.
+6. The stage 5-8 behaviour still holds (a short regression: play, queue keys, a playlist, About, fast-forward); host suite passes; leave the card clean and `state clear`.
+
+- [ ] **Step 1:** Implement; build without warnings.
+- [ ] **Step 2:** Board checks. Commit (one or several): final subject `Recover from a card pulled out while running; say when the library is full`.
+
+---
+
 ## Stage 8 hardware check (run by the user)
 
 On a phone charger or a power bank.
@@ -367,5 +395,6 @@ On a phone charger or a power bank.
 2. **Sleep timer:** set `Sleep: 15 min` while music plays: at the end the music fades out over about 10 seconds and stops, and the light goes off; `D` carries on from there at your normal volume. Press a key during a fade: it stops fading.
 3. **Fast-forward and rewind:** hold `6` on Now Playing: the time races forward, faster after two seconds, and playback jumps there when you let go. Hold `4` to go back. A quick tap still skips.
 4. **About:** shows the number of tracks, free space on the card and the build date.
-5. **An hour of play:** play for an hour or more with loop all: no dropouts, clicks or buzz.
-6. **The guide:** read `docs/USER_GUIDE.md`: it matches what the player does.
+5. **Card out and back:** while music plays, pull the SD card: the screen says `Card error`, then `Insert SD card`; push it back in: the player carries on (press `D` to resume) with no reset.
+6. **An hour of play:** play for an hour or more with loop all: no dropouts, clicks or buzz.
+7. **The guide:** read `docs/USER_GUIDE.md`: it matches what the player does.
