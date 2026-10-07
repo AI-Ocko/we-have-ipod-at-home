@@ -53,6 +53,24 @@ Not in this stage (do not build): backlight timeout, sleep timer, the About scre
 7. **Text entry timing.** Commit after one second, a different key commits, the 16-character limit, `*` while a letter is pending, a held key not cycling. Pinned in Task 1 and Task 5.
 8. **Saving must not be heard.** Pinned in Task 4: edits of a 1,000-entry playlist during the music track, exact frame count, `underruns=0`.
 
+## Amendments made during implementation
+
+Decided by the controller while the stage ran; the code follows these where they differ from the text above.
+
+- `PLAYLIST_FULL` refuses only APPEND; removing and moving work on a computer-made file of more than 1,000 entries. `playlist_edit`'s input must be seekable (it is read twice so that a refusal writes nothing).
+- A line of only spaces and tabs is not an entry. Spaces and tabs at either end of a path line are ignored; a line is a comment only when `#` is its first byte.
+- An absolute path that matches nothing is retried with up to six leading folders removed (a computer's mount point such as `/run/media/<user>/<card>/` or `/Volumes/<card>/`); the longest tail that matches wins.
+- Names must not start with `.` (`PLAYLIST_NAME_BAD_START`, "Can't start w/ .") or be a Windows-reserved name (`PLAYLIST_NAME_RESERVED`, "Name reserved").
+- With no listing yet the Playlists screen shows `Loading`; if the first listing fails it shows the reason as a row and `5`/`6` asks again. `New playlist` never counts as the letter N for letter jumps.
+- A background task that cannot get its memory at start-up logs it and the player runs without that feature (spec section 11 amended). The FAT rename window during a save is a recorded, accepted risk (spec section 8).
+- After a failed edit, Move and Remove are refused with `Busy` until the playlist has been reloaded from the card.
+- `C` closes any open layer (options, picker, confirmation) before switching between Now Playing and the menus.
+
+Deferred by the reviews (none blocks this stage's hardware check):
+
+- Stage 8: the device writes UTF-8 into `.m3u` (Windows players read `.m3u` as ANSI), and Windows ANSI `.m3u` files with accented names do not match; consider writing `.m3u8` and a Latin-1 fallback. With no index loaded (after a failed scan) every playlist request answers `Library busy`, even listing and deleting. A failed create can in a rare sequence leave a whole-looking `.tmp` that tidying renames into a playlist. `Play` on an entry moved past row 1,000 of a cut playlist says `File missing`. `CON.X`-style names are allowed. An append to a playlist deleted meanwhile shows nothing.
+- Cosmetic: long lines in `test_playlist.c` and `playlist_task.c`; the folder is read up to four times on a create; `textentry_row`'s scroll clause is unreachable with the current sizes.
+
 ## File Structure
 
 | Path | Responsibility | Task |

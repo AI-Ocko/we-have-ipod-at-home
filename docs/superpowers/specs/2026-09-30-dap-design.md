@@ -478,7 +478,8 @@ taken from the card root, and if it matches nothing, again with its leading
 folders removed one at a time (up to six), so that a computer's mount point such
 as `/run/media/<user>/<card>/` or `/Volumes/<card>/` does not matter; a relative
 path is tried from the card root, then from `/playlists/`. Spaces and tabs at
-either end of a line are ignored. Letter case is ignored, as the card's file system ignores
+either end of a path line are ignored (a line is a comment only when `#` is
+its first byte). Letter case is ignored, as the card's file system ignores
 it.
 
 Entries are resolved against the index by path. Entries with no match are kept
