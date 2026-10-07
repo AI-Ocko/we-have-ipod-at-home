@@ -506,7 +506,8 @@ up or down.
 Names: capitals, digits, space and `- ' & .`; 1 to 16 characters once spaces
 at either end are trimmed; must not end with `.` (the card's file system drops
 it) or start with `.` (such files are hidden and not listed); must not be a name Windows reserves (`CON`, `PRN`, `AUX`, `NUL`, `COM1`-`COM9`,
-`LPT1`-`LPT9`, in any case), which a computer could not open; must not duplicate an existing playlist, ignoring case and the ending
+`LPT1`-`LPT9`, in any case, alone or followed by `.` and more), which a computer
+could not open; must not duplicate an existing playlist, ignoring case and the ending
 (shows "Name in use"). Names of computer-made files are shown as they are.
 Limit: 1,000 entries per playlist; a computer-made file with more shows and
 plays its first 1,000 and keeps the rest.
